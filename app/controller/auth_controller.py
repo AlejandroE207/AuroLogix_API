@@ -10,7 +10,11 @@ router = APIRouter(
 )
 
 @router.post("/login")
-async def login(name: str, password: str, db: AsyncSession = Depends(get_db)):
+async def login(
+    name: str = Body(..., embed=True),
+    password: str = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db),
+):
     """Inicia sesión con nombre y contraseña, y devuelve access y refresh token."""
     user_data = await auth_service.login_user(db, name, password)
     if user_data.result == 1:

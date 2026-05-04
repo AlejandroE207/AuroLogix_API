@@ -1,58 +1,50 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 
 from app.core.security import create_access_token_and_refresh_token, verify_token, create_token
 from app.core.config import get_settings
-from app.repository.token_repository import TokenRepository
+from app.repository import auth_repository
 
 settings = get_settings()
 
+
 class TokenService:
-    def __init__(self, db: Session):
-        self.repository = TokenRepository(db)
+    def __init__(self, db: AsyncSession):
+        self.db = db
 
     async def issue_new_tokens(self, user_id: int):
-        """
-        Lógica para el Login: crea tokens y guarda el refresh en DB.
-        """
-        # 1. Generar los strings JWT (usando tu security.py)
-        tokens = await create_access_token_and_refresh_token(user_id)
-        
-        # 2. Calcular expiración para la DB
+        """Genera access+refresh y guarda el refresh en BD usando `auth_repository`."""
+        tokens = create_access_token_and_refresh_token(user_id)
+
         expires_at = datetime.utcnow() + timedelta(days=settings.refresh_token_expire_days)
-        
-        # 3. Persistir en base de datos
-        self.repository.save_refresh_token(
-            user_id=user_id,
+
+        saved = await auth_repository.create_refresh_token(
+            db=self.db,
+            id_usuario=user_id,
             token=tokens["refresh_token"],
-            expires_at=expires_at
+            fecha_expiracion=expires_at,
         )
-        
+
+        if not saved:
+            raise HTTPException(status_code=500, detail="No se pudo guardar refresh token")
+
         return tokens
 
     async def refresh_access_token(self, refresh_token: str):
-        """
-        Lógica para renovar el Access Token sin pedir contraseña.
-        """
-        # 1. Verificar validez del JWT string
-        payload = await verify_token(refresh_token, token_type="refresh")
+        """Valida el refresh token y genera un nuevo access token si está OK."""
+        payload = verify_token(refresh_token, token_type="refresh")
         if not payload:
             raise HTTPException(status_code=401, detail="Refresh token inválido o expirado")
 
-        # 2. Verificar existencia y estado en la Base de Datos
-        db_token = self.repository.get_token_from_db(refresh_token)
-        if not db_token or db_token.expires_at < datetime.utcnow():
-            raise HTTPException(status_code=401, detail="Token revocado o inexistente")
+        db_token = await auth_repository.get_refresh_token(self.db, refresh_token)
+        if not db_token:
+            raise HTTPException(status_code=401, detail="Refresh token revocado o inexistente")
 
-        # 3. Generar un NUEVO Access Token
-        new_access_token = await create_token(
-            data={"user_id": db_token.user_id},
-            token_type="access"
-        )
+        new_access_token = create_token(data={"user_id": db_token.id_usuario}, token_type="access")
 
         return {
             "access_token": new_access_token,
-            "refresh_token": refresh_token, # Reutilizamos el mismo refresh
-            "token_type": "bearer"
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
         }

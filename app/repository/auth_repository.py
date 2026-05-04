@@ -60,7 +60,7 @@ async def create_refresh_token(db: AsyncSession, id_usuario: int, token: str, fe
         result = await db.execute(query, {
             "id_usuario": id_usuario,
             "token": token,
-            "fecha_creacion": datetime.now(),
+            "fecha_creacion": datetime.utcnow(),
             "fecha_expiracion": fecha_expiracion
         })
         await db.commit()
@@ -187,4 +187,9 @@ async def login(db: AsyncSession, nombre: str, contrasena: str):
         user_data.result = 0
         user_data.message = "Error al procesar el login"
         return user_data
+    
+async def delete_token_by_user_id(db: AsyncSession, id_usuario: int):
+    """
+    
+    """
     

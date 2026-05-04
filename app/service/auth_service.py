@@ -1,5 +1,11 @@
+from datetime import datetime, timedelta
+
 from app.core.security import create_token, verify_token
 from app.repository import auth_repository
+from app.core.config import get_settings
+
+
+settings = get_settings()
 
 
 async def login_user(db, nombre: str, contrasena: str):
@@ -26,12 +32,42 @@ async def refresh_access_token(db, refresh_token: str):
         token_type="access",
     )
 
+    new_refresh_token = create_token(
+        data={"user_id": stored_token.id_usuario},
+        token_type="refresh",
+    )
+
+    refresh_expires_at = datetime.utcnow() + timedelta(
+        days=settings.refresh_token_expire_days
+    )
+
+    new_refresh_saved = await auth_repository.create_refresh_token(
+        db=db,
+        id_usuario=stored_token.id_usuario,
+        token=new_refresh_token,
+        fecha_expiracion=refresh_expires_at,
+    )
+
+    if not new_refresh_saved:
+        return {
+            "result": 0,
+            "message": "No se pudo renovar el refresh token",
+        }
+
+    revoked = await auth_repository.revoke_refresh_token(db, refresh_token)
+    if not revoked:
+        await auth_repository.revoke_refresh_token(db, new_refresh_token)
+        return {
+            "result": 0,
+            "message": "No se pudo revocar el refresh token anterior",
+        }
+
     return {
         "result": 1,
         "message": "Access token renovado correctamente",
         "access_token": new_access_token,
         "token_type": "bearer",
-        "refresh_token": refresh_token,
+        "refresh_token": new_refresh_token,
     }
 
 

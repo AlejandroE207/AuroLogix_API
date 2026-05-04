@@ -13,12 +13,7 @@ async def get_user_by_id(db: AsyncSession, id: int):
         result = await db.execute(query, {"user_id": id})
         row = result.mappings().first()
         if row:
-            user_data.id = row["id"]
-            user_data.nombre = row["nombre"]
-            user_data.rol = row["rol"]
-            user_data.activo = row["activo"]
-            user_data.creado = row["creado"]
-            user_data.actualizado = row["actualizado"]
+            user_data = User(**dict(row))
             user_data.result = 1
             user_data.message = "Usuario encontrado"
         else:
@@ -43,12 +38,7 @@ async def get_user_by_name(db: AsyncSession, nombre: str):
         row = result.mappings().all()
         for user in row:
             user_data = User()
-            user_data.id = user["id"]
-            user_data.nombre = user["nombre"]
-            user_data.rol = user["rol"]
-            user_data.activo = user["activo"]
-            user_data.creado = user["creado"]
-            user_data.actualizado = user["actualizado"]
+            user_data= User(**dict(user))
             user_data.result = 1
             user_data.message = "Usuario encontrado"
             user_data_list.append(user_data)        
@@ -98,10 +88,7 @@ async def create_user(db: AsyncSession, user: User):
             result = await db.execute(query, {"nombre": user.nombre, "contrasena": user.contrasena, "rol": user.rol, "activo": user.activo, "creado": user.creado, "actualizado": user.actualizado})
             row = result.mappings().first()
             await db.commit()
-            user_data.id = row["id"]
-            user_data.nombre = row["nombre"]
-            user_data.rol = row["rol"]
-            user_data.activo = row["activo"]
+            user_data = User(**dict(row))
             user_data.result = 1
             user_data.message = "Usuario creado exitosamente"
             return user_data
@@ -126,12 +113,7 @@ async def update_user(db: AsyncSession,  user: User):
                                           "activo": user.activo, "actualizado": user.actualizado})
         await db.commit()
         row = result.mappings().first()
-        user_data.id = row["id"]
-        user_data.nombre = row["nombre"]
-        user_data.rol = row["rol"]
-        user_data.activo = row["activo"]
-        user_data.creado = row["creado"]
-        user_data.actualizado = row["actualizado"]
+        user_data= User(**dict(row))
         user_data.result = 1
         user_data.message = "Usuario actualizado exitosamente"
         return user_data

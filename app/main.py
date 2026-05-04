@@ -2,7 +2,7 @@ from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import get_settings
-from app.controller import user_controller
+from app.controller import inventory_controller, position_controller, user_controller
 from app.controller import auth_controller
 from app.db.session import get_db, Base
 
@@ -29,6 +29,8 @@ app.add_middleware(
 
 app.include_router(user_controller.router)
 app.include_router(auth_controller.router)
+app.include_router(position_controller.router)
+app.include_router(inventory_controller.router)
 # app.include_router(users.router, prefix="/users", tags=["Users"])
 # app.include_router(inventory.router, prefix="/inventory", tags=["Inventory"])
 
