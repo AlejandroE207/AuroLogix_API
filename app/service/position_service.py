@@ -25,3 +25,12 @@ async def update_position_state(db, id_position: int, new_state: int):
     position_data = Position()
     position_data = await position_repository.update_position_state(db, id_position, new_state)
     return position_data
+
+async def get_random_position_storage(db,type_item: str):
+    position_data = Position()
+    position_data = await position_repository.get_position_random_storage(db, type_item)
+    return position_data
+    
+# async def get_random_position_picking(db):
+
+

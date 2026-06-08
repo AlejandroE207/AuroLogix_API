@@ -5,6 +5,7 @@ class Position(BaseModel):
     cod_posicion: str = None
     bodega: int = None
     estado: int = None
+    reserva: str = None
     
     result: int = None
     message: str = None
