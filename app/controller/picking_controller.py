@@ -37,9 +37,10 @@ async def create_picking(
     if result.result == 1:
         return {"message": result.message, "picking_id": result.id}
     else:
+        print(f"Error al crear el picking: {result.message}")
         raise HTTPException(status_code=400, detail=result.message)
 
-
+# PENDIENTE - CREAR ENDPOINT PARA CREAR PICKING A PARTIR DE UN ARCHIVO EXCEL
 @router.post("/create_picking_by_file")
 async def create_picking_by_file(
     db:AsyncSession = Depends(get_db),
@@ -127,9 +128,20 @@ async def list_picking_view(
     db: AsyncSession = Depends(get_db),
     current_user_role: int = Depends(get_current_user_role),
 ):
-    """Lista los pickings con su información detallada para la vista."""
+    """Lista los pickings pendientes con su información detallada para la vista de la app movil."""
     picking_view_list = await picking_service.list_picking_view(db)
     if picking_view_list and picking_view_list[0].result == 1:
         return picking_view_list
     else:
         raise HTTPException(status_code=404, detail="No se encontraron pickings para mostrar en la vista")
+    
+@router.get("/list_orders")
+async def get_list_orders(
+    db: AsyncSession = Depends(get_db),
+    current_user_role: int = Depends(get_current_user_role),
+    
+):
+    """Lista los pickings pendientes con su información detallada para la vista web"""
+    order_list = await picking_service.get_list_orders(db)
+    return order_list
+    

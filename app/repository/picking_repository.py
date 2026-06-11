@@ -1,6 +1,6 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.model.picking_model import Picking, Picking_detalle, Picking_items
+from app.model.picking_model import Orden, Picking, Picking_detalle, Picking_items
 from app.model.picking_view_model import PickingView
 
 async def create_picking(db: AsyncSession, picking_data: Picking):
@@ -199,3 +199,28 @@ async def list_picking_view(db:AsyncSession):
         picking_view.message = "Error al listar los pickings"
         picking_view_list.append(picking_view)
         return picking_view_list
+    
+async def get_order_id_by_picking(db: AsyncSession, id_picking: int):
+    """Obtiene el ID de la orden asociada a un picking."""
+    order_data = Orden()
+    query = text("""
+                    SELECT p.id_orden as id, o.estado
+                    FROM picking AS p
+                    JOIN orden_salida AS o ON o.id = p.id_orden
+                    WHERE p.id = :id_picking;
+                 """)
+    try:
+        result = await db.execute(query, {"id_picking": id_picking})
+        row = result.mappings().first()
+        if row:
+            order_data = Orden(**dict(row))
+            order_data.result = 1
+            order_data.message = "ID de la orden obtenido exitosamente"
+            return order_data
+        else:
+            order_data.result = 0
+            order_data.message = "No se encontró la orden para este picking"
+            return order_data
+    except Exception as e:
+        print(f"Error al obtener el ID de la orden por picking: {e}")
+        return None

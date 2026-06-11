@@ -1,4 +1,4 @@
-from app.repository import picking_repository, order_repository, inventory_repository, motion_repository
+from app.repository import picking_repository, order_repository, inventory_repository, motion_repository, order_repository
 from app.model.picking_model import Orden, Picking, Picking_detalle
 from app.model.inventory_model import Motion
 from datetime import datetime
@@ -25,7 +25,8 @@ async def create_picking(db, orden: Orden, picking_data: Picking, picking_detall
         else:
             return create_picking_data
     else:
-        return picking_data
+        return create_order
+        # return picking_data
     
 
 
@@ -35,12 +36,17 @@ async def get_next_task(db, id_picking: int):
     if task.result == 0:
         result = await picking_repository.complete_picking(db, id_picking)
         if result["result"] == 1:
-            return {"completed":True, "message": "No hay más tareas pendientes. Picking completado."}
+            order_data = await order_repository.update_order_status_by_picking(db, id_picking)
+            if order_data.result == 1:
+                return {"completed":True, "message": "No hay más tareas pendientes. Picking completado."}
+            else:
+                return {"completed":False, "message": "Error al actualizar el estado de la orden"}
         else:
             return {"completed":False, "message": "Error al completar el picking"}
     return {"completed":False , "task": task}
 
-
+# ACTUALIZAR ESTADO DE ORDEN ACA MISMO, DESPUES DE CONFIRMAR LA PRIMERA TAREA, SE CAMBIA EL ESTADO DE LA ORDEN
+# Y CUANDO SE FINALICE Y NO HAYA UNA TAREA MAS SE FINALIZA LA ORDEN
 async def confirm_task(db, id_task: int, id_picking: int, cod_posicion_escaneada: int, id_usuario: int):
     """
     Confirma una tarea de picking después de escanear la posición de origen.
@@ -83,8 +89,16 @@ async def confirm_task(db, id_task: int, id_picking: int, cod_posicion_escaneada
         if inventory_result["result"] == 0:
             return {"result": 0, "message": "Error al actualizar el inventario"}
         
-        # Actualizar estado de la tarea a completada (estado = 2)
+        # Actualizar estado de la tarea a completada (estado = 3)
         task_update = await picking_repository.update_task_status(db, id_task, 3)
+        order_data = await picking_repository.get_order_id_by_picking(db, id_picking)
+        if order_data.estado == 1:
+            order_data.estado = 2
+            order_update = await order_repository.update_order_status(db, order_data)
+            if order_update.result == 0:
+                return {"result": 0, "message": "Error al actualizar el estado de la orden"}
+            
+        
         
         if task_update["result"] == 0:
             return {"result": 0, "message": "Error al actualizar el estado de la tarea"}
@@ -101,3 +115,6 @@ async def list_picking_view(db):
     """Lista los pickings con su información detallada para la vista."""
     picking_view_list = await picking_repository.list_picking_view(db)
     return picking_view_list
+
+async def get_list_orders(db):
+    return await order_repository.get_list_orders(db)
