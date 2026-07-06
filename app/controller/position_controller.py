@@ -81,3 +81,19 @@ async def update_position_state(
         return position_data.message
     else:
         raise HTTPException(status_code=400, detail=position_data.message)
+    
+@router.post("/create_rack")
+async def create_rack(
+    db: AsyncSession = Depends(get_db),
+    posiciones: list[Position] = Body(..., embed=True),
+    current_user_role: int = Depends(get_current_user_role),
+):
+    """Crea un rack de posiciones"""
+    # if current_user_role != 1:
+    #     raise HTTPException(status_code=403, detail="No tiene permisos para crear un rack de posiciones")
+    
+    position_data_list = await position_service.create_rack(db, posiciones)
+    if position_data_list and position_data_list[0].result == 1:
+        return HTTPException(status_code=200, detail="Rack de posiciones creado exitosamente")
+    else:
+        raise HTTPException(status_code=400, detail="Error al crear el rack de posiciones")

@@ -2,9 +2,25 @@ from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import get_settings
-from app.controller import dashboard_controller, input_controller, inventory_controller, item_controller, motion_controller, picking_controller, position_controller, user_controller
+from app.controller import dashboard_controller, input_controller, inventory_controller, item_controller, motion_controller, picking_controller, position_controller, transfer_controller, user_controller
 from app.controller import auth_controller
 from app.db.session import get_db, Base
+
+import sys
+import asyncio
+
+if sys.platform == "win32":
+    # 1. Cambiar la política del loop
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    # 2. Forzar al loop actual en este hilo a cambiar si ya fue creado
+    try:
+        loop = asyncio.get_event_loop()
+        if type(loop).__name__ == "ProactorEventLoop":
+            new_loop = asyncio.WindowsSelectorEventLoopPolicy().new_event_loop()
+            asyncio.set_event_loop(new_loop)
+    except RuntimeError:
+        pass
 
 settings = get_settings()
 
@@ -36,6 +52,7 @@ app.include_router(item_controller.router)
 app.include_router(motion_controller.router)
 app.include_router(inventory_controller.router)
 app.include_router(dashboard_controller.router)
+app.include_router(transfer_controller.router)
 # app.include_router(inventory_controller.router)
 # app.include_router(users.router, prefix="/users", tags=["Users"])
 # app.include_router(inventory.router, prefix="/inventory", tags=["Inventory"])

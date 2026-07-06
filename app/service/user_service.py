@@ -12,6 +12,11 @@ async def get_list_user_by_name(db, nombre: str):
     user_data_list = await user_repository.get_user_by_name(db, nombre)
     return user_data_list
 
+async def get_all_users(db):
+    user_data_list = []
+    user_data_list = await user_repository.get_all_users(db)
+    return user_data_list
+
 async def create_user(db, user: User):
     user.contrasena = get_hash_password(user.contrasena)
     user_data = User()
@@ -19,6 +24,7 @@ async def create_user(db, user: User):
     return user_data
 
 async def update_user(db, user: User):
+    user.contrasena = get_hash_password(user.contrasena)
     user_data = User()
     user_data = await user_repository.update_user(db, user)
     return user_data

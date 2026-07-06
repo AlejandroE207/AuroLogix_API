@@ -3,8 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.service import picking_service
 from app.model.picking_model import Picking, Picking_items, Picking_detalle, Orden
-import pandas as pd
-import io
 from app.core.security import(
     get_current_token_payload,
     get_current_user_id,
@@ -24,12 +22,14 @@ async def create_picking(
     db: AsyncSession = Depends(get_db),
     codigo: str = Body(..., embed=True),
     cliente: str = Body(..., embed=True),
+    tipo: str = Body(..., embed=True),
     id_usuario: int = Depends(get_current_user_id),
+    detalles: str = Body(..., embed=True),
     lista_items: list[Picking_items] = Body(..., embed=True),
 ):
     """Crea un nuevo picking."""
     #ESTADO 1: Pendiente, 2: En proceso, 3: Completado
-    orden = Orden(codigo=codigo, cliente = cliente, estado= 1, id_usuario = id_usuario) 
+    orden = Orden(codigo=codigo, tipo=tipo ,cliente = cliente, estado= 1, id_usuario = id_usuario, detalles = detalles) 
     picking_data = Picking( estado = 1, id_usuario = id_usuario)
     picking_detalle = Picking_detalle(items = lista_items)
     
@@ -40,27 +40,35 @@ async def create_picking(
         print(f"Error al crear el picking: {result.message}")
         raise HTTPException(status_code=400, detail=result.message)
 
-# PENDIENTE - CREAR ENDPOINT PARA CREAR PICKING A PARTIR DE UN ARCHIVO EXCEL
-@router.post("/create_picking_by_file")
-async def create_picking_by_file(
-    db:AsyncSession = Depends(get_db),
+
+@router.post("/import_orders")
+async def import_orders(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
     id_usuario: int = Depends(get_current_user_id),
-    file: UploadFile = File(...)
 ):
-    """Crea un o un listado de pickings a partir de un archivo Excel."""
-    if not (file.filename.endswith('.xlsx') or file.filename.endswith('.xls')):
-        raise HTTPException(
-            status_code=400, detail="Archivo no válido. Se requiere un archivo Excel (.xlsx o .xls)."
-            )
-    try:
-        contents = await file.read()
-        df = pd.read_excel(io.BytesIO(contents))
-        df.columns = [str(col).strip().lower() for col in df.columns]
-        return df.to_dict(orient='records')
-        
-        
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error al procesar el archivo: {str(e)}")
+    """Importa órdenes de salida y sus tareas de picking desde un CSV o XLSX.
+
+    Debe incluir: ``Nro documento``, ``Razón social cliente factura``,
+    ``Item``, ``Cantidad`` y ``Bodega``. También admite ``Fecha``, ``Estado``,
+    ``Lote`` y ``Cliente factura``. Solo se importan bodegas que comiencen por
+    ``M`` y las filas de un mismo documento se agrupan en una sola orden.
+    """
+    filename = file.filename or ""
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if extension not in {"csv", "xlsx"}:
+        raise HTTPException(status_code=400, detail="El archivo debe tener formato .csv o .xlsx.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="El archivo está vacío.")
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="El archivo no puede superar 10 MB.")
+
+    result = await picking_service.import_orders_file(db, content, extension, id_usuario)
+    if result["result"] == 0:
+        raise HTTPException(status_code=422, detail=result["message"])
+    return result
 
 
 @router.get("/{id_picking}/next_task")
@@ -112,11 +120,12 @@ async def confirm_task(
     id_picking: int,
     id_task: int = Body(..., embed=True),
     cod_posicion_escaneada: str = Body(..., embed=True),
+    cod_item: str = Body(..., embed=True),
     db: AsyncSession = Depends(get_db),
     id_usuario: int = Depends(get_current_user_id)
 ):
     """Confirma una tarea de picking después de escanear la posición de origen."""
-    result = await picking_service.confirm_task(db, id_task, id_picking, cod_posicion_escaneada, id_usuario)
+    result = await picking_service.confirm_task(db, id_task, id_picking, cod_posicion_escaneada, cod_item, id_usuario)
     if result["result"] == 1:
         return result
     else:

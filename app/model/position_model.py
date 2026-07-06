@@ -1,11 +1,12 @@
+from typing import Optional
 from pydantic import BaseModel
 
 class Position(BaseModel):
-    id: int = None
-    cod_posicion: str = None
-    bodega: int = None
-    estado: int = None
-    reserva: str = None
+    id: Optional[int] = None
+    cod_posicion: Optional[str] = None
+    bodega: Optional[int] = None
+    estado: Optional[int] = None
+    reserva: Optional[str] = None
     
-    result: int = None
-    message: str = None
+    result: Optional[int] = None
+    message: Optional[str] = None

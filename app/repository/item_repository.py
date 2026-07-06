@@ -33,11 +33,11 @@ async def search_items(db: AsyncSession, que: str):
         return items
     
 async def search_item_by_cod_item(db: AsyncSession, cod_item: str):
-    item = Item()
+    item_data = Item()
     query = text("""
                  SELECT id, cod_item, descripcion, unidad_medida, tipo_item
                  FROM items
-                 WHERE cod_item = :cod_item
+                 WHERE cod_item :cod_item
                  """)
     try:
         result = await db.execute(query, {"cod_item": cod_item})

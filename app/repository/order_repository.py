@@ -6,14 +6,15 @@ from app.model.order_view_model import OrderView, ItemsOrderView
 async def create_order (db:AsyncSession, orden: Orden):
     order_data = Orden()
     query = text("""
-                 INSERT INTO orden_salida (codigo, cliente, estado, id_usuario)
-                 VALUES (:codigo, :cliente, :estado, :id_usuario)
-                RETURNING id, codigo, cliente, estado, id_usuario
+                 INSERT INTO orden_salida (codigo, cliente, estado, id_usuario, tipo, detalles)
+                 VALUES (:codigo, :cliente, :estado, :id_usuario, :tipo, :detalles)
+                RETURNING id, codigo, cliente, estado, id_usuario, tipo, detalles
                  """)
     
     try:
         result = await db.execute(query, {"codigo": orden.codigo, "cliente": orden.cliente, 
-                                          "estado": orden.estado, "id_usuario": orden.id_usuario})
+                                          "estado": orden.estado, "id_usuario": orden.id_usuario, 
+                                          "tipo": orden.tipo, "detalles": orden.detalles})
         row = result.mappings().first()
         await db.commit()
         if row:
@@ -100,6 +101,8 @@ async def get_list_orders(db:AsyncSession):
                     o.codigo,
                     o.cliente,
                     o.estado,
+                    o.tipo,
+                    o.detalles,
                     pd.id_item,
                     i.cod_item,
                     i.descripcion as item,
@@ -126,6 +129,8 @@ async def get_list_orders(db:AsyncSession):
                     codigo=row.codigo,
                     cliente=row.cliente,
                     estado=row.estado,
+                    tipo=row.tipo,
+                    detalles=row.detalles,
                     productos=[]
                 )
 

@@ -31,6 +31,9 @@ async def get_random_position_storage(db,type_item: str):
     position_data = await position_repository.get_position_random_storage(db, type_item)
     return position_data
     
-# async def get_random_position_picking(db):
+async def create_rack(db, posiciones: list[Position]):
+    position_data_list = []
+    position_data_list = await position_repository.create_rack(db, posiciones)
+    return position_data_list
 
 

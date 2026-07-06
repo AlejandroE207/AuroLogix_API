@@ -1,7 +1,80 @@
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.model.picking_model import Orden, Picking, Picking_detalle, Picking_items
 from app.model.picking_view_model import PickingView
+
+
+async def get_items_by_codes(db: AsyncSession, codes: list[str]):
+    """Obtiene los artículos existentes para los códigos del archivo de importación."""
+    if not codes:
+        return {}
+    query = text("""
+        SELECT id, cod_item, descripcion FROM items
+        WHERE CAST(cod_item AS TEXT) IN :codes
+    """).bindparams(bindparam("codes", expanding=True))
+    result = await db.execute(query, {"codes": codes})
+    return {str(row["cod_item"]).strip(): dict(row) for row in result.mappings().all()}
+
+
+async def get_inventory_for_items(db: AsyncSession, item_ids: list[int]):
+    """Devuelve inventario disponible ordenado para asignarlo a tareas de picking."""
+    if not item_ids:
+        return {}
+    query = text("""
+        SELECT id_item, id_posicion, lote, cantidad FROM inventario
+        WHERE id_item IN :item_ids AND cantidad > 0
+        ORDER BY id_item, fecha_vencimiento NULLS LAST, id_posicion, lote
+    """).bindparams(bindparam("item_ids", expanding=True))
+    result = await db.execute(query, {"item_ids": item_ids})
+    inventory: dict[int, list[dict]] = {}
+    for row in result.mappings().all():
+        inventory.setdefault(row["id_item"], []).append(dict(row))
+    return inventory
+
+
+async def get_existing_order_codes(db: AsyncSession, codes: list[str]) -> set[str]:
+    if not codes:
+        return set()
+    query = text("""SELECT codigo FROM orden_salida WHERE codigo IN :codes""").bindparams(
+        bindparam("codes", expanding=True)
+    )
+    result = await db.execute(query, {"codes": codes})
+    return {str(row["codigo"]).strip() for row in result.mappings().all()}
+
+
+async def create_bulk_pickings(db: AsyncSession, orders: list[dict]) -> list[dict]:
+    """Inserta el lote completo sin confirmar la sesión."""
+    created = []
+    order_query = text("""
+        INSERT INTO orden_salida (codigo, cliente, estado, id_usuario, tipo, detalles)
+        VALUES (:codigo, :cliente, 1, :id_usuario, :tipo, :detalles) RETURNING id
+    """)
+    picking_query = text("""
+        INSERT INTO picking (id_posicion, estado, id_orden, id_usuario)
+        VALUES (NULL, 1, :id_orden, :id_usuario) RETURNING id
+    """)
+    detail_query = text("""
+        INSERT INTO picking_detalle (id_picking, id_item, cantidad, lote)
+        VALUES (:id_picking, :id_item, :cantidad, :lote)
+    """)
+    task_query = text("""
+        INSERT INTO picking_task (id_picking, id_item, cantidad, lote, id_posicion_origen, estado)
+        VALUES (:id_picking, :id_item, :cantidad, :lote, :id_posicion_origen, 1)
+    """)
+    for order in orders:
+        order_id = (await db.execute(order_query, order)).mappings().one()["id"]
+        picking_id = (await db.execute(picking_query, {
+            "id_orden": order_id, "id_usuario": order["id_usuario"]
+        })).mappings().one()["id"]
+        for task in order["tasks"]:
+            values = {**task, "id_picking": picking_id}
+            await db.execute(detail_query, values)
+            await db.execute(task_query, values)
+        created.append({"codigo": order["codigo"], "order_id": order_id, "picking_id": picking_id})
+    return created
+
+
+
 
 async def create_picking(db: AsyncSession, picking_data: Picking):
     picking_result = Picking()
@@ -101,7 +174,7 @@ async def get_next_task(db: AsyncSession, id_picking: int):
     """Obtiene la siguiente tarea pendiente de un picking."""
     task_result = Picking_items()
     query = text("""
-                    SELECT pt.id, pt.id_picking, pt.id_item, i.descripcion ,pt.cantidad, pt.lote, pt.id_posicion_origen,p.cod_posicion, pt.estado
+                    SELECT pt.id, pt.id_picking, pt.id_item, i.cod_item, i.descripcion ,pt.cantidad, pt.lote, pt.id_posicion_origen,p.cod_posicion, pt.estado
                     FROM picking_task as pt
                     INNER JOIN posiciones as p ON id_posicion_origen = p.id 
                     INNER JOIN items as i ON pt.id_item = i.id
@@ -115,6 +188,7 @@ async def get_next_task(db: AsyncSession, id_picking: int):
         row = result.mappings().first()
         if row:
             task_result.id_item = row["id_item"]
+            task_result.cod_item = row["cod_item"]
             task_result.nombre_item = row["descripcion"]
             task_result.cantidad = row["cantidad"]
             task_result.lote = row["lote"]
@@ -224,3 +298,18 @@ async def get_order_id_by_picking(db: AsyncSession, id_picking: int):
     except Exception as e:
         print(f"Error al obtener el ID de la orden por picking: {e}")
         return None
+    
+async def delete_task(db: AsyncSession, id_task: int):
+    """Elimina una tarea de picking."""
+    query = text("""
+                 DELETE FROM picking_task
+                 WHERE id = :id_task
+                 """)
+    try:
+        await db.execute(query, {"id_task": id_task})
+        await db.commit()
+        return {"result": 1, "message": "Tarea eliminada exitosamente"}
+    except Exception as e:
+        print(f"Error al eliminar la tarea: {e}")
+        await db.rollback()
+        return {"result": 0, "message": "Error al eliminar la tarea"}

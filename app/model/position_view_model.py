@@ -9,6 +9,7 @@ class PositionView(BaseModel):
     posicion_estado: Optional[str] = None
     reserva: Optional[str] = None
     id_item: Optional[int] = None
+    cod_item: Optional[str] = None
     producto: Optional[str] = None
     cantidad: Optional[float] = None
     unidad_medida: Optional[str] = None

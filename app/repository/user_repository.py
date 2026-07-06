@@ -56,6 +56,30 @@ async def get_user_by_name(db: AsyncSession, nombre: str):
         user_data_list.append(user_data)
         return user_data_list
 
+async def get_all_users(db: AsyncSession):
+    user_data_list = []
+    query = text("""
+                 SELECT id, nombre, rol, activo, creado, actualizado
+                    FROM usuarios
+                 ORDER BY id ASC
+                 """)
+    try:
+        result = await db.execute(query)
+        rows = result.mappings().all()
+        for row in rows:
+            user_data = User(**dict(row))
+            user_data.result = 1
+            user_data.message = "Usuario encontrado"
+            user_data_list.append(user_data)
+        return user_data_list
+    except Exception as e:
+        print(f"Error al obtener los usuarios: {e}")
+        user_data = User()
+        user_data.result = 0
+        user_data.message = "Error al obtener los usuarios"
+        user_data_list.append(user_data)
+        return user_data_list
+
 async def verify_user_by_name(db: AsyncSession, nombre: str):
     query = text("""
                     SELECT id FROM usuarios

@@ -5,7 +5,6 @@ from app.service import user_service
 from app.model.user_model import User
 from app.core.security import (
     get_current_token_payload,
-    get_current_user_id,
     get_current_user_role,
     require_role,
 )
@@ -41,6 +40,19 @@ async def read_user_by_name(
         return user_list
     else:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+@router.get("/list_all_users")
+async def read_all_users(
+    db: AsyncSession = Depends(get_db),
+    role_check: int = Depends(require_role(2)),
+):
+    """Lista todos los usuarios registrados. Solo para rol 2 (admin)."""
+    user_list = await user_service.get_all_users(db)
+    if not user_list:
+        return []
+    if user_list[0].result == 1:
+        return user_list
+    raise HTTPException(status_code=400, detail=user_list[0].message)
 
 @router.post("/create_user")
 async def create_user(

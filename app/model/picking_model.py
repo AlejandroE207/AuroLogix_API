@@ -11,11 +11,14 @@ class CommonPicking(BaseModel):
 class Orden(CommonPicking):
     codigo: Optional[str] = None
     cliente: Optional[str] = None
+    tipo: Optional[str] = None
     id_usuario: Optional[int] = None
+    detalles: Optional[str] = None
     
 class Picking_items(BaseModel):
     id: Optional[int] = None
     id_item: Optional[int] = None
+    cod_item: Optional[str] = None
     nombre_item: Optional[str] = None
     cantidad: Optional[int] = None
     lote: Optional[str] = None

@@ -318,6 +318,7 @@ async def get_all_positions(db: AsyncSession):
                         ep.descripcion AS posicion_estado,
                         p.reserva,
                         i.id_item,
+                        it.cod_item,
                         it.descripcion AS producto,
                         i.cantidad,
                         it.unidad_medida,
@@ -405,3 +406,33 @@ async def get_positions_by_item(db: AsyncSession, item: str = None, lote: str = 
         position_data_list.append(position_view)
         return position_data_list
         
+        
+async def create_rack(db: AsyncSession, posiciones: list[Position]):
+    position_data_list = []
+    query = text("""
+                 INSERT INTO posiciones (cod_posicion, bodega, estado, reserva)
+                 VALUES (:cod_posicion, :bodega, :estado, :reserva)
+                 RETURNING id
+                 """)
+    try:
+        for posicion in posiciones:
+            result = await db.execute(query, {"cod_posicion": posicion.cod_posicion, "bodega": posicion.bodega, "estado": posicion.estado, "reserva": posicion.reserva})
+            await db.commit()
+            row = result.mappings().first()
+            if row:
+                posicion.id = row["id"]
+                posicion.result = 1
+                posicion.message = "Posición creada exitosamente"
+            else:
+                posicion.result = 0
+                posicion.message = "Error al crear la posición"
+            position_data_list.append(posicion)
+        return position_data_list
+    except Exception as e:
+        print(f"Error al crear las posiciones: {e}")
+        await db.rollback()
+        for posicion in posiciones:
+            posicion.result = 0
+            posicion.message = "Error al crear la posición"
+            position_data_list.append(posicion)
+        return position_data_list

@@ -12,7 +12,7 @@ async def create_input(db: AsyncSession, putaway: Putaway):
                  id_usuario, fecha, estado, fecha_vencimiento)
                  VALUES (:id_item, :lote, :cantidad, :posicion_sugerida_id,
                  :id_usuario, :fecha, :estado, :fecha_vencimiento)
-                RETURNING id, posicion_sugerida_id
+                RETURNING id, id_item, lote, cantidad, fecha_vencimiento, posicion_sugerida_id, id_usuario, fecha, estado
                  """)
     try:
         result = await db.execute(query, {"id_item": putaway.id_item, "lote": putaway.lote, "cantidad": putaway.cantidad,
@@ -21,7 +21,7 @@ async def create_input(db: AsyncSession, putaway: Putaway):
         row = result.mappings().first()
         await db.commit()
         if row:
-            putaway_data.id = row["id"]
+            putaway_data = Putaway(**dict(row))
             putaway_data.result = 1
             putaway_data.message = "Putaway creado exitosamente"
         else:
