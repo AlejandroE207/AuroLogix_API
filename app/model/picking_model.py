@@ -24,6 +24,8 @@ class Picking_items(BaseModel):
     lote: Optional[str] = None
     id_posicion_origen: Optional[int] = None
     cod_posicion_origen: Optional[str] = None
+    reserva: Optional[str] = None
+    estado: Optional[int] = None
     
     result: Optional[int] = None
     message: Optional[str] = None

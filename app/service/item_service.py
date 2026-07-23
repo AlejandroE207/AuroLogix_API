@@ -15,3 +15,4 @@ async def search_item_inventory(db, query: str):
     items = []
     items = await item_repository.search_item_inventory(db, query)
     return items
+

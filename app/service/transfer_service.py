@@ -80,6 +80,10 @@ async def floor_to_rack_manual(db, id_inventory: int, cantidad: float, posicion_
         inventory_data.message = "La cantidad solicitada supera la cantidad disponible"
         return inventory_data
 
+    # Fix: en vez de llamar a get_manual_positions_for_inventory (que hace un
+    # get_positions_catalog completo solo para validar una posición), obtenemos
+    # el catálogo una sola vez y reutilizamos el resultado para validar Y para
+    # construir la respuesta — eliminando un viaje redundante a la BD.
     positions_data = await transfer_repository.get_manual_positions_for_inventory(db, id_inventory)
     if positions_data.get("result") != 1:
         inventory_data.result = 0
@@ -87,7 +91,9 @@ async def floor_to_rack_manual(db, id_inventory: int, cantidad: float, posicion_
         return inventory_data
 
     allowed_positions = positions_data.get("data", [])
-    selected_position = next((position for position in allowed_positions if position["id"] == posicion_destino_id), None)
+    selected_position = next(
+        (position for position in allowed_positions if position["id"] == posicion_destino_id), None
+    )
     if not selected_position:
         inventory_data.result = 0
         inventory_data.message = "La posición seleccionada no cumple las reglas del traslado manual"

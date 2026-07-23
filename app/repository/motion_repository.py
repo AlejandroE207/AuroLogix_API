@@ -6,6 +6,11 @@ from app.model.inventory_model import Motion
 from app.model.motion_view_model import MotionView
 
 async def create_motion_input(db: AsyncSession, motion: Motion):
+    """
+    Inserta el movimiento de entrada.
+    Fix: eliminado el 'await db.commit()' — el service maneja la transacción
+    completa (motion + inventory + delete_putaway) en un solo commit atómico.
+    """
     motion_data = Motion()
     query = text("""
                  INSERT INTO movimientos (tipo_movimiento, id_item, lote, cantidad, posicion_origen_id,
@@ -15,12 +20,19 @@ async def create_motion_input(db: AsyncSession, motion: Motion):
                   :posicion_destino_id, :fecha, :id_usuario)
                   RETURNING id
                  """)
-    try: 
-        result = await db.execute(query, {"tipo_movimiento": motion.tipo_movimiento, "id_item": motion.id_item, "lote":motion.lote,
-                                          "cantidad":motion.cantidad, "posicion_origen_id": motion.posicion_origen_id, "posicion_destino_id":motion.posicion_destino_id,
-                                          "fecha":motion.fecha, "id_usuario":motion.id_usuario})
+    try:
+        result = await db.execute(query, {
+            "tipo_movimiento": motion.tipo_movimiento,
+            "id_item": motion.id_item,
+            "lote": motion.lote,
+            "cantidad": motion.cantidad,
+            "posicion_origen_id": motion.posicion_origen_id,
+            "posicion_destino_id": motion.posicion_destino_id,
+            "fecha": motion.fecha,
+            "id_usuario": motion.id_usuario,
+        })
         row = result.mappings().first()
-        await db.commit()
+        # Sin commit — el service hace commit de toda la operación al final
         if row:
             motion_data.id = row["id"]
             motion_data.result = 1
@@ -36,7 +48,7 @@ async def create_motion_input(db: AsyncSession, motion: Motion):
         return motion_data
 
 
-async def create_motion_output(db: AsyncSession, motion: Motion):
+async def create_motion_output(db: AsyncSession, motion: Motion, commit: bool = True):
     """Registra un movimiento de salida (picking/extracción)."""
     motion_data = Motion()
     query = text("""
@@ -53,7 +65,8 @@ async def create_motion_output(db: AsyncSession, motion: Motion):
                                           "posicion_destino_id": motion.posicion_destino_id,
                                           "fecha": motion.fecha, "id_usuario": motion.id_usuario})
         row = result.mappings().first()
-        await db.commit()
+        if commit:
+            await db.commit()
         if row:
             motion_data.id = row["id"]
             motion_data.result = 1
@@ -64,7 +77,8 @@ async def create_motion_output(db: AsyncSession, motion: Motion):
         return motion_data
     except Exception as e:
         print(f"Error al registrar el movimiento de salida: {e}")
-        await db.rollback()
+        if commit:
+            await db.rollback()
         motion_data.result = 0
         motion_data.message = "Error al registrar el movimiento de salida"
         return motion_data

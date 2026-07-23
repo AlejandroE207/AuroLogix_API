@@ -34,7 +34,9 @@ async def create_order (db:AsyncSession, orden: Orden):
         return order_data
     
     
-async def update_order_status(db:AsyncSession, order_data: Orden):
+async def update_order_status(
+    db: AsyncSession, order_data: Orden, commit: bool = True
+):
     query = text("""
                  UPDATE orden_salida
                  SET estado = :estado
@@ -44,7 +46,8 @@ async def update_order_status(db:AsyncSession, order_data: Orden):
     try:
         result = await db.execute(query, {"estado": order_data.estado, "id": order_data.id})
         row = result.mappings().first()
-        await db.commit()
+        if commit:
+            await db.commit()
         if row:
             updated_order = Orden(**dict(row))
             updated_order.result = 1
@@ -56,12 +59,15 @@ async def update_order_status(db:AsyncSession, order_data: Orden):
             return order_data
     except Exception as e:
         print(f"Error al actualizar el estado de la orden: {e}")
-        db.rollback()
+        if commit:
+            await db.rollback()
         order_data.result = 0
         order_data.message = "Error al actualizar el estado de la orden"
         return order_data
     
-async def update_order_status_by_picking(db: AsyncSession, id_picking: int):
+async def update_order_status_by_picking(
+    db: AsyncSession, id_picking: int, commit: bool = True
+):
     query = text("""
                  UPDATE orden_salida
                  SET estado = 3
@@ -75,7 +81,8 @@ async def update_order_status_by_picking(db: AsyncSession, id_picking: int):
     try:
         result = await db.execute(query, {"id_picking": id_picking})
         row = result.mappings().first()
-        await db.commit()
+        if commit:
+            await db.commit()
         if row:
             updated_order = Orden(**dict(row))
             updated_order.result = 1
@@ -88,7 +95,8 @@ async def update_order_status_by_picking(db: AsyncSession, id_picking: int):
             return order_data
     except Exception as e:
         print(f"Error al actualizar el estado de la orden: {e}")
-        db.rollback()
+        if commit:
+            await db.rollback()
         order_data = Orden()
         order_data.result = 0
         order_data.message = "Error al actualizar el estado de la orden"

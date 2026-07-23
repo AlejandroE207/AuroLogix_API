@@ -47,7 +47,10 @@ async def import_orders(
     db: AsyncSession = Depends(get_db),
     id_usuario: int = Depends(get_current_user_id),
 ):
-    """Importa órdenes de salida y sus tareas de picking desde un CSV o XLSX.
+    """Importa órdenes de salida desde un CSV o XLSX.
+
+    Las tareas se generan al solicitar el picking, con el inventario disponible
+    en ese momento.
 
     Debe incluir: ``Nro documento``, ``Razón social cliente factura``,
     ``Item``, ``Cantidad`` y ``Bodega``. También admite ``Fecha``, ``Estado``,
@@ -92,6 +95,14 @@ async def next_task(
             )
         }
 
+    if result.get("awaiting_stock"):
+        return {
+            "completed": False,
+            "awaiting_stock": True,
+            "message": result["message"],
+            "missing_inventory": result.get("missing_inventory", []),
+        }
+
     # Caso 2: Existe una tarea pendiente
     task = result.get("task")
 
@@ -105,7 +116,11 @@ async def next_task(
             "cantidad": task.cantidad,
             "lote": task.lote,
             "id_posicion_origen": task.id_posicion_origen,
-            "cod_posicion_origen": task.cod_posicion_origen
+            "cod_posicion_origen": task.cod_posicion_origen,
+            "reserva": task.reserva,
+            "es_posicion_picking": bool(
+                task.reserva and task.reserva.strip().lower() == "picking"
+            )
         }
 
     # Caso 3: Error inesperado
@@ -120,16 +135,33 @@ async def confirm_task(
     id_picking: int,
     id_task: int = Body(..., embed=True),
     cod_posicion_escaneada: str = Body(..., embed=True),
-    cod_item: str = Body(..., embed=True),
     db: AsyncSession = Depends(get_db),
     id_usuario: int = Depends(get_current_user_id)
 ):
     """Confirma una tarea de picking después de escanear la posición de origen."""
-    result = await picking_service.confirm_task(db, id_task, id_picking, cod_posicion_escaneada, cod_item, id_usuario)
+    result = await picking_service.confirm_task(
+        db, id_task, id_picking, cod_posicion_escaneada, id_usuario
+    )
     if result["result"] == 1:
         return result
     else:
         raise HTTPException(status_code=400, detail=result["message"])
+
+
+@router.get("/{id_picking}/tasks")
+async def list_tasks(
+    id_picking: int,
+    db: AsyncSession = Depends(get_db),
+    id_usuario: int = Depends(get_current_user_id),
+):
+    """Lista todas las extracciones para que el operario elija cuál realizar."""
+    result = await picking_service.get_tasks_overview(db, id_picking)
+    if result.get("result") == 1:
+        return result
+    raise HTTPException(
+        status_code=404,
+        detail=result.get("message", "Picking no encontrado"),
+    )
 
 
 @router.get("/list_picking_view")

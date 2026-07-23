@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.git/
+.gitignore
+.vscode/
+.agents/
+app/.env
+.env
+.env.example
+docker-compose.yml
+Dockerfile
+README.md
+
+# .env raiz con credenciales para docker-compose

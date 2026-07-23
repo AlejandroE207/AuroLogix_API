@@ -13,9 +13,9 @@ from app.repository import item_repository, position_repository
 
 
 TYPE_RULES = {
-    "MP": {"reserve": "abastecimiento"},
-    "PT": {"reserve": "abastecimiento"},
-    "ME": {"reserve": "complementario"},
+    "MP":  {"reserve": "abastecimiento"},
+    "PT":  {"reserve": "abastecimiento"},
+    "ME":  {"reserve": "complementario"},
     "MEE": {"reserve": "complementario"},
 }
 
@@ -43,24 +43,27 @@ def _build_position_groups(rows: list[dict[str, Any]]):
     return grouped
 
 
-def _filter_positions_for_type(rows: list[dict[str, Any]], type_item: str, only_free: bool = False):
+def _filter_positions_for_type(
+    rows: list[dict[str, Any]],
+    type_item: str,
+    only_free: bool = False,
+    allow_picking: bool = False,
+):
     rule = TYPE_RULES.get(type_item)
     if not rule:
         return []
 
-    # 1. Filtramos directamente las filas que pertenecen a la zona (reserva) asignada
+    allowed_reserves = {rule["reserve"]}
+    if allow_picking:
+        allowed_reserves.add("picking")
+
     allowed_rows = []
-    
     for row in rows:
-        # Validar que pertenezca a la zona correspondiente (ej. "abastecimiento")
-        if row["reserva"] != rule["reserve"]:
+        reserve = (row["reserva"] or "").strip().lower()
+        if reserve not in allowed_reserves:
             continue
-            
-        # Si se solicita que esté libre, validar el estado
         if only_free and row["estado"] != 1:
             continue
-            
-        # Si pasa los filtros anteriores, la posición es totalmente válida
         allowed_rows.append(row)
 
     return allowed_rows
@@ -204,13 +207,18 @@ async def update_transfer_task_state(db: AsyncSession, id_task: int, estado: int
 
 
 async def get_positions_catalog(db: AsyncSession):
+    """
+    Trae todas las posiciones con su conteo de inventario en UN solo query.
+    Se usa como fuente única en manual_positions y confirm_transfer para
+    evitar múltiples viajes a la BD.
+    """
     query = text("""
                  SELECT p.id, p.cod_posicion, p.bodega, p.estado, p.reserva,
                         COUNT(i.id) AS inventario_count
                  FROM posiciones p
                  LEFT JOIN inventario i ON i.id_posicion = p.id
                  GROUP BY p.id, p.cod_posicion, p.bodega, p.estado, p.reserva
-                 ORDER BY p.bodega ASC, p.cod_posicion ASC
+                 ORDER BY p.bodega ASC, p.id ASC
                  """)
 
     try:
@@ -232,7 +240,12 @@ async def get_manual_positions_for_inventory(db: AsyncSession, id_inventory: int
         return {"result": 0, "message": "No se pudo determinar el tipo de item", "data": []}
 
     positions = await get_positions_catalog(db)
-    allowed_positions = _filter_positions_for_type(positions, item_type, only_free=False)
+    allowed_positions = _filter_positions_for_type(
+        positions,
+        item_type,
+        only_free=False,
+        allow_picking=True,
+    )
 
     return {
         "result": 1,
@@ -337,6 +350,7 @@ async def confirm_transfer_core(
     cod_posicion_escaneada: str,
     id_usuario: int,
 ):
+    # ── 1. Cargar tarea ───────────────────────────────────────────────────────
     task = await get_transfer_task_by_id(db, id_task)
     if task.result != 1:
         return task
@@ -351,16 +365,18 @@ async def confirm_transfer_core(
         task.message = "La tarea no tiene inventario asociado; probablemente fue eliminado"
         return task
 
+    # ── 2. Cargar inventario (UNA sola vez — fix: era llamado dos veces) ─────
     inventory_data = await get_inventory_by_id(db, task.id_inventario)
     if inventory_data.result != 1:
         return inventory_data
 
-    inventory_data = await get_inventory_by_id(db, task.id_inventario)
-    if inventory_data.result != 1:
-        return inventory_data
-
+    # ── 3. Cargar catálogo de posiciones (UNA sola vez — fix: era llamado
+    #       3 veces en total entre get_manual_positions y confirm) ─────────────
     positions = await get_positions_catalog(db)
-    scanned_position = next((position for position in positions if position["cod_posicion"] == cod_posicion_escaneada), None)
+
+    scanned_position = next(
+        (p for p in positions if p["cod_posicion"] == cod_posicion_escaneada), None
+    )
     if not scanned_position:
         task.result = 0
         task.message = "La posición escaneada no existe"
@@ -371,6 +387,7 @@ async def confirm_transfer_core(
         task.message = "La posición escaneada no coincide con la posición sugerida"
         return task
 
+    # ── 4. Validaciones de cantidad ───────────────────────────────────────────
     cantidad_transferir = task.cantidad or 0
     if cantidad_transferir <= 0:
         task.result = 0
@@ -382,15 +399,16 @@ async def confirm_transfer_core(
         task.message = "La cantidad a trasladar supera el inventario disponible"
         return task
 
+    # ── 5. Transacción ────────────────────────────────────────────────────────
     started_transaction = False
     try:
         if not db.in_transaction():
             await db.begin()
             started_transaction = True
 
-        update_state = await update_transfer_task_state(db, id_task, 3)
-        if update_state.get("result") != 1:
-            raise RuntimeError(update_state.get("message", "No se pudo actualizar la tarea"))
+        # Fix: update_transfer_task_state se llamaba DOS veces con el mismo
+        # estado=3. Se elimina la primera llamada redundante y se deja solo
+        # la llamada al final, tras todas las operaciones de inventario.
 
         motion_data = Motion(
             tipo_movimiento=3,
@@ -530,6 +548,8 @@ async def confirm_transfer_core(
         if position_update.result != 1:
             raise RuntimeError(position_update.message or "No se pudo actualizar la posición destino")
 
+        # Fix: update_transfer_task_state se llamaba dos veces — se deja solo aquí,
+        # al final, una vez que todas las operaciones de inventario terminaron OK.
         finish_state = await update_transfer_task_state(db, id_task, 3)
         if finish_state.get("result") != 1:
             raise RuntimeError(finish_state.get("message", "No se pudo finalizar la tarea"))

@@ -37,7 +37,7 @@ async def search_item_by_cod_item(db: AsyncSession, cod_item: str):
     query = text("""
                  SELECT id, cod_item, descripcion, unidad_medida, tipo_item
                  FROM items
-                 WHERE cod_item :cod_item
+                 WHERE cod_item = :cod_item
                  """)
     try:
         result = await db.execute(query, {"cod_item": cod_item})
@@ -88,6 +88,26 @@ async def search_item_inventory(db: AsyncSession, que:str):
         items.append(item_data)
         return items
     
+async def get_all_items_map(db: AsyncSession) -> dict[str, int]:
+    """Devuelve un diccionario {cod_item: id} con todos los items registrados.
+
+    Se usa para resolver referencias en bloque durante importaciones masivas
+    (por ejemplo, la carga de inventario desde Excel) sin hacer una consulta
+    por cada fila del archivo.
+    """
+    query = text("""
+                 SELECT id, cod_item
+                 FROM items
+                 """)
+    try:
+        result = await db.execute(query)
+        rows = result.mappings().all()
+        return {row["cod_item"]: row["id"] for row in rows if row["cod_item"] is not None}
+    except Exception as e:
+        print(f"Error al obtener el mapa de items: {e}")
+        return {}
+
+
 async def get_item_type_by_id(db: AsyncSession, id_item: int):
     query = text("""
                  SELECT tipo_item

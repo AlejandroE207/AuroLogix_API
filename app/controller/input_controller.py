@@ -23,7 +23,7 @@ async def create_input(
     db: AsyncSession = Depends(get_db),
     id_item: int = Body(..., embed=True),
     lote : str = Body(..., embed = True),
-    cantidad: int = Body(..., embed = True),
+    cantidad: float = Body(..., embed = True),
     fecha_vencimiento: Optional[str] = Body(None, embed = True),
     id_usuario = Depends(get_current_user_id),
     current_user_role: int = Depends(get_current_user_role),

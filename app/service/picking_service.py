@@ -7,7 +7,7 @@ from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
 
 from app.repository import picking_repository, order_repository, inventory_repository, motion_repository
-from app.model.picking_model import Orden, Picking, Picking_detalle
+from app.model.picking_model import Orden, Picking, Picking_detalle, Picking_items
 from app.model.inventory_model import Motion
 from datetime import datetime
 
@@ -59,6 +59,48 @@ def _parse_quantity(value) -> int:
     if quantity <= 0 or quantity != quantity.to_integral_value():
         raise ValueError("la cantidad debe ser un entero mayor que cero")
     return int(quantity)
+
+
+def _allocate_inventory(requested_items: list[dict], available: dict[int, list[dict]]):
+    """Asigna primero el lote solicitado y luego lotes alternos por FEFO."""
+    tasks, errors = [], []
+    for requested_item in requested_items:
+        item_id = requested_item["id_item"]
+        requested_lot = _normalise_value(requested_item.get("lote"))
+        pending = int(requested_item["cantidad"])
+
+        entries = available.get(item_id, [])
+        ordered_entries = sorted(
+            entries,
+            key=lambda entry: (
+                0 if requested_lot and _normalise_value(entry.get("lote")).casefold() == requested_lot.casefold() else 1,
+                entry.get("fecha_vencimiento") is None,
+                str(entry.get("fecha_vencimiento") or "9999-12-31"),
+            ),
+        )
+        for entry in ordered_entries:
+            if pending == 0:
+                break
+            assigned = min(pending, int(entry["cantidad"]))
+            if assigned <= 0:
+                continue
+            tasks.append({
+                "id_item": item_id,
+                "cantidad": assigned,
+                "lote": entry["lote"],
+                "id_posicion_origen": entry["id_posicion"],
+            })
+            entry["cantidad"] -= assigned
+            pending -= assigned
+
+        if pending:
+            errors.append({
+                "id_item": item_id,
+                "item_code": requested_item.get("item_code"),
+                "lote": requested_lot,
+                "faltante": pending,
+            })
+    return tasks, errors
 
 
 def _read_import_rows(content: bytes, extension: str) -> list[dict]:
@@ -169,36 +211,33 @@ async def import_orders_file(db, content: bytes, extension: str, id_usuario: int
     if errors:
         return {"result": 0, "message": "El archivo tiene errores y no se importó ninguna orden: " + "; ".join(errors[:10])}
 
-    item_codes = list({code for order in orders.values() for code, _ in order["items"]})
-    items_by_code = await picking_repository.get_items_by_codes(db, item_codes)
-    missing_codes = sorted(set(item_codes) - set(items_by_code))
-    if missing_codes:
-        return {"result": 0, "message": "No existen artículos para los códigos: " + ", ".join(missing_codes[:20])}
     existing_codes = await picking_repository.get_existing_order_codes(db, list(orders))
-    if existing_codes:
-        return {"result": 0, "message": "Ya existen órdenes con los códigos: " + ", ".join(sorted(existing_codes)[:20])}
+    not_registered_orders = [
+        {"codigo": code, "motivo": "La orden ya existe"}
+        for code in orders
+        if code in existing_codes
+    ]
+    new_orders = [order for code, order in orders.items() if code not in existing_codes]
 
-    inventory = await picking_repository.get_inventory_for_items(db, [item["id"] for item in items_by_code.values()])
-    available = {item_id: [dict(entry) for entry in entries] for item_id, entries in inventory.items()}
-    orders_to_create, stock_errors = [], []
-    for order in orders.values():
-        tasks = []
+    item_codes = list({code for order in new_orders for code, _ in order["items"]})
+    items_by_code = await picking_repository.get_items_by_codes(db, item_codes)
+    orders_to_create = []
+    for order in new_orders:
+        missing_codes = sorted({code for code, _ in order["items"] if code not in items_by_code})
+        if missing_codes:
+            not_registered_orders.append({
+                "codigo": order["codigo"],
+                "motivo": "No existen artículos para los códigos: " + ", ".join(missing_codes),
+            })
+            continue
+
+        requested_items = []
         for (item_code, requested_lot), requested in order["items"].items():
-            item, pending = items_by_code[item_code], requested
-            for entry in available.get(item["id"], []):
-                if pending == 0:
-                    break
-                inventory_lot = _normalise_value(entry["lote"])
-                if requested_lot and inventory_lot.casefold() != requested_lot.casefold():
-                    continue
-                assigned = min(pending, int(entry["cantidad"]))
-                if assigned:
-                    tasks.append({"id_item": item["id"], "cantidad": assigned, "lote": entry["lote"], "id_posicion_origen": entry["id_posicion"]})
-                    entry["cantidad"] -= assigned
-                    pending -= assigned
-            if pending:
-                lot_label = f", lote {requested_lot}" if requested_lot else ""
-                stock_errors.append(f"orden {order['codigo']}, artículo {item_code}{lot_label}: faltan {pending} unidades")
+            requested_items.append({
+                "id_item": items_by_code[item_code]["id"],
+                "cantidad": requested,
+                "lote": requested_lot,
+            })
         details = {
             "fecha": order["fecha"],
             "bodega": order["bodega"],
@@ -206,19 +245,70 @@ async def import_orders_file(db, content: bytes, extension: str, id_usuario: int
             "origen": "importacion_archivo",
         }
         orders_to_create.append({"codigo": order["codigo"], "cliente": order["cliente"], "id_usuario": id_usuario,
-                                 "tipo": "OF", "detalles": json.dumps(details, ensure_ascii=False), "tasks": tasks})
-    if stock_errors:
-        return {"result": 0, "message": "Inventario insuficiente: " + "; ".join(stock_errors[:20])}
+                                 "tipo": "OF", "detalles": json.dumps(details, ensure_ascii=False), "items": requested_items})
+
+    if not orders_to_create:
+        return {
+            "result": 1,
+            "message": "El archivo fue procesado; no había órdenes nuevas para registrar.",
+            "created_orders": 0,
+            "created_pickings": 0,
+            "skipped_rows": skipped_rows,
+            "registered_orders": [],
+            "not_registered_orders": not_registered_orders,
+        }
     try:
         created = await picking_repository.create_bulk_pickings(db, orders_to_create)
         await db.commit()
     except Exception as error:
         await db.rollback()
         return {"result": 0, "message": f"No fue posible crear las órdenes: {error}"}
-    return {"result": 1, "message": f"Se crearon {len(created)} órdenes de salida y sus pickings.",
-            "created_orders": len(created), "created_pickings": len(created), "skipped_rows": skipped_rows, "orders": created}
+    registered_orders = [order["codigo"] for order in created]
+    return {
+        "result": 1,
+        "message": f"Se registraron {len(created)} órdenes de salida.",
+        "created_orders": len(created),
+        "created_pickings": len(created),
+        "skipped_rows": skipped_rows,
+        "registered_orders": registered_orders,
+        "not_registered_orders": not_registered_orders,
+        "orders": created,
+    }
 
 async def create_picking(db, orden: Orden, picking_data: Picking, picking_detalle: Picking_detalle):
+    requested_items = []
+    for item in picking_detalle.items:
+        if item.id_item is None or item.cantidad is None or item.cantidad <= 0:
+            return Picking(
+                result=0,
+                message="Cada item debe tener id_item y una cantidad mayor que cero",
+            )
+        requested_items.append({
+            "id_item": item.id_item,
+            "cantidad": item.cantidad,
+            "lote": item.lote,
+        })
+
+    inventory = await picking_repository.get_inventory_for_items(
+        db, list({item["id_item"] for item in requested_items})
+    )
+    available = {
+        item_id: [dict(entry) for entry in entries]
+        for item_id, entries in inventory.items()
+    }
+    allocated_tasks, allocation_errors = _allocate_inventory(requested_items, available)
+    if allocation_errors:
+        descriptions = [
+            f"item {error['id_item']}"
+            + (f", lote {error['lote']}" if error["lote"] else "")
+            + f": faltan {error['faltante']} unidades"
+            for error in allocation_errors
+        ]
+        return Picking(
+            result=0,
+            message="Inventario insuficiente: " + "; ".join(descriptions),
+        )
+
     create_order = await order_repository.create_order(db, orden)
     if create_order.result == 1:
         picking_data.id_orden = create_order.id
@@ -227,10 +317,11 @@ async def create_picking(db, orden: Orden, picking_data: Picking, picking_detall
             picking_detalle.id_picking = create_picking_data.id
             create_picking_detalle = await picking_repository.create_picking_detalle(db, picking_detalle)
             if create_picking_detalle.result == 1:
-                for item in picking_detalle.items:
-                    item_data = await inventory_repository.get_position_by_item(db, item.id_item, item.lote)
-                    item.id_posicion_origen = item_data.id_posicion_origen
-                create_picking_task = await picking_repository.create_picking_task(db, picking_detalle)
+                picking_tasks = Picking_detalle(
+                    id_picking=create_picking_data.id,
+                    items=[Picking_items(**task) for task in allocated_tasks],
+                )
+                create_picking_task = await picking_repository.create_picking_task(db, picking_tasks)
                 if create_picking_task.result == 1:
                     return create_picking_data
                 else:
@@ -249,6 +340,66 @@ async def get_next_task(db, id_picking: int):
     """Obtiene la siguiente tarea pendiente del picking."""
     task = await picking_repository.get_next_task(db, id_picking)
     if task.result == 0:
+        task_count = await picking_repository.count_picking_tasks(db, id_picking)
+        if task_count == 0:
+            details = await picking_repository.get_picking_details(db, id_picking)
+            if not details:
+                return {
+                    "completed": False,
+                    "message": "El picking no tiene productos asociados.",
+                }
+
+            requested_items = [
+                {
+                    "id_item": detail["id_item"],
+                    "item_code": str(detail["cod_item"]),
+                    "cantidad": detail["cantidad"],
+                    "lote": detail["lote"],
+                }
+                for detail in details
+            ]
+            inventory = await picking_repository.get_inventory_for_items(
+                db, list({item["id_item"] for item in requested_items})
+            )
+            available = {
+                item_id: [dict(entry) for entry in entries]
+                for item_id, entries in inventory.items()
+            }
+            tasks, allocation_errors = _allocate_inventory(requested_items, available)
+            if allocation_errors:
+                missing_inventory = [
+                    {
+                        "cod_item": error["item_code"],
+                        "lote": error["lote"] or None,
+                        "cantidad_faltante": error["faltante"],
+                    }
+                    for error in allocation_errors
+                ]
+                return {
+                    "completed": False,
+                    "awaiting_stock": True,
+                    "message": "El picking está pendiente por inventario insuficiente.",
+                    "missing_inventory": missing_inventory,
+                }
+
+            try:
+                await picking_repository.insert_picking_tasks(db, id_picking, tasks)
+                await db.commit()
+            except Exception as error:
+                await db.rollback()
+                return {
+                    "completed": False,
+                    "message": f"No fue posible generar las tareas de picking: {error}",
+                }
+
+            task = await picking_repository.get_next_task(db, id_picking)
+            if task.result == 1:
+                return {"completed": False, "task": task}
+            return {
+                "completed": False,
+                "message": "No fue posible obtener la tarea de picking generada.",
+            }
+
         result = await picking_repository.complete_picking(db, id_picking)
         if result["result"] == 1:
             order_data = await order_repository.update_order_status_by_picking(db, id_picking)
@@ -260,73 +411,195 @@ async def get_next_task(db, id_picking: int):
             return {"completed":False, "message": "Error al completar el picking"}
     return {"completed":False , "task": task}
 
+async def get_tasks_overview(db, id_picking: int):
+    """Devuelve todas las extracciones y cualquier cantidad aún sin inventario."""
+    details = await picking_repository.get_picking_details(db, id_picking)
+    if not details:
+        return {"result": 0, "message": "El picking no tiene productos asociados"}
+
+    task_count = await picking_repository.count_picking_tasks(db, id_picking)
+    missing_inventory = []
+    if task_count == 0:
+        requested_items = [
+            {
+                "id_item": detail["id_item"],
+                "item_code": str(detail["cod_item"]),
+                "cantidad": detail["cantidad"],
+                "lote": detail["lote"],
+            }
+            for detail in details
+        ]
+        inventory = await picking_repository.get_inventory_for_items(
+            db, list({item["id_item"] for item in requested_items})
+        )
+        available = {
+            item_id: [dict(entry) for entry in entries]
+            for item_id, entries in inventory.items()
+        }
+        tasks, errors = _allocate_inventory(requested_items, available)
+        if tasks:
+            await picking_repository.insert_picking_tasks(db, id_picking, tasks)
+            await db.commit()
+        missing_inventory = [
+            {
+                "id_item": error["id_item"],
+                "cod_item": error["item_code"],
+                "lote_solicitado": error["lote"] or None,
+                "cantidad_faltante": error["faltante"],
+            }
+            for error in errors
+        ]
+
+    tasks = await picking_repository.list_picking_tasks(db, id_picking)
+    requested_by_item = {}
+    for detail in details:
+        entry = requested_by_item.setdefault(
+            detail["id_item"],
+            {"cod_item": str(detail["cod_item"]), "cantidad": 0, "lotes": []},
+        )
+        entry["cantidad"] += int(detail["cantidad"])
+        lot = _normalise_value(detail.get("lote"))
+        if lot and lot not in entry["lotes"]:
+            entry["lotes"].append(lot)
+
+    assigned_by_item = {}
+    for task in tasks:
+        assigned_by_item[task["id_item"]] = (
+            assigned_by_item.get(task["id_item"], 0) + int(task["cantidad"])
+        )
+    missing_inventory = [
+        {
+            "id_item": item_id,
+            "cod_item": requested["cod_item"],
+            "lotes_solicitados": requested["lotes"],
+            "cantidad_faltante": requested["cantidad"] - assigned_by_item.get(item_id, 0),
+        }
+        for item_id, requested in requested_by_item.items()
+        if requested["cantidad"] > assigned_by_item.get(item_id, 0)
+    ]
+    return {
+        "result": 1,
+        "message": "Extracciones del picking obtenidas exitosamente",
+        "tasks": tasks,
+        "missing_inventory": missing_inventory,
+        "has_missing_inventory": bool(missing_inventory),
+    }
+
+
 # ACTUALIZAR ESTADO DE ORDEN ACA MISMO, DESPUES DE CONFIRMAR LA PRIMERA TAREA, SE CAMBIA EL ESTADO DE LA ORDEN
 # Y CUANDO SE FINALICE Y NO HAYA UNA TAREA MAS SE FINALIZA LA ORDEN
-async def confirm_task(db, id_task: int, id_picking: int, cod_posicion_escaneada: int, cod_item: str, id_usuario: int):
+async def confirm_task(
+    db,
+    id_task: int,
+    id_picking: int,
+    cod_posicion_escaneada: str,
+    id_usuario: int,
+):
     """
     Confirma una tarea de picking después de escanear la posición de origen.
     Registra el movimiento y actualiza el inventario.
     """
     # Obtener la información de la tarea
-    task = await picking_repository.get_next_task(db, id_picking)
+    task = await picking_repository.get_task_by_id(db, id_picking, id_task)
     
-    if task.result == 0:
+    if task is None:
         return {"result": 0, "message": "Tarea no encontrada"}
+
+    if task.estado != 1:
+        return {
+            "result": 0,
+            "message": "La tarea seleccionada ya fue realizada o no está pendiente",
+        }
     
     # Validar que la posición escaneada sea correcta
     if cod_posicion_escaneada != task.cod_posicion_origen:
         return {"result": 0, "message": f"Posición incorrecta. Se esperaba {task.id_posicion_origen}, se escaneó {cod_posicion_escaneada}"}
     
-    if cod_item != task.cod_item:
-        return {"result": 0, "message": f"Item incorrecto. Se esperaba {task.cod_item} {task.nombre_item}, se escaneó {cod_item}"}
-    
     try:
         # Crear registro de movimiento (salida/picking)
         # tipo_movimiento: 1=ENTRADA, 2=SALIDA
+        cantidad_salida = float(task.cantidad)
         motion = Motion(
             tipo_movimiento=2,  # SALIDA
             id_item=task.id_item,
             lote=task.lote,
-            cantidad=task.cantidad,
+            cantidad=cantidad_salida,
             posicion_origen_id=task.id_posicion_origen,
             posicion_destino_id=None,  # No hay posición destino en picking
             fecha=datetime.now(),
             id_usuario=id_usuario
         )
         
-        motion_result = await motion_repository.create_motion_output(db, motion)
+        motion_result = await motion_repository.create_motion_output(
+            db, motion, commit=False
+        )
         
         if motion_result.result == 0:
-            return {"result": 0, "message": "Error al registrar el movimiento"}
+            raise RuntimeError("Error al registrar el movimiento")
         
         # Actualizar inventario (restar la cantidad)
         inventory_result = await inventory_repository.update_inventory_quantity(
-            db, task.id_posicion_origen, task.id_item, task.lote, task.cantidad
+            db,
+            task.id_posicion_origen,
+            task.id_item,
+            task.lote,
+            cantidad_salida,
+            commit=False,
         )
         
         if inventory_result["result"] == 0:
-            return {"result": 0, "message": "Error al actualizar el inventario"}
+            raise RuntimeError(inventory_result["message"])
         
-        # Actualizar estado de la tarea a completada (estado = 3)
-        task_update = await picking_repository.update_task_status(db, id_task, 3)
-        task_update = await picking_repository.delete_task(db, id_task)
+        # Conservar la tarea como historial y marcarla completada (estado = 3).
+        task_update = await picking_repository.update_task_status(
+            db, id_task, 3, commit=False
+        )
         order_data = await picking_repository.get_order_id_by_picking(db, id_picking)
         if order_data.estado == 1:
             order_data.estado = 2
-            order_update = await order_repository.update_order_status(db, order_data)
+            order_update = await order_repository.update_order_status(
+                db, order_data, commit=False
+            )
             if order_update.result == 0:
-                return {"result": 0, "message": "Error al actualizar el estado de la orden"}
+                raise RuntimeError("Error al actualizar el estado de la orden")
             
         
         
         if task_update["result"] == 0:
-            return {"result": 0, "message": "Error al actualizar el estado de la tarea"}
-        
-        return {"result": 1, "message": "Tarea confirmada exitosamente", 
-                "id_movimiento": motion_result.id}
+            raise RuntimeError("Error al actualizar el estado de la tarea")
+
+        completed = False
+        missing_inventory = []
+        pending_tasks = await picking_repository.count_pending_picking_tasks(db, id_picking)
+        if pending_tasks == 0:
+            overview = await get_tasks_overview(db, id_picking)
+            missing_inventory = overview.get("missing_inventory", [])
+            if not missing_inventory:
+                picking_update = await picking_repository.complete_picking(
+                    db, id_picking, commit=False
+                )
+                if picking_update["result"] == 0:
+                    raise RuntimeError("Error al completar el picking")
+                completed_order = await order_repository.update_order_status_by_picking(
+                    db, id_picking, commit=False
+                )
+                if completed_order.result == 0:
+                    raise RuntimeError("Error al completar la orden")
+                completed = True
+
+        await db.commit()
+
+        return {
+            "result": 1,
+            "message": "Tarea confirmada exitosamente",
+            "id_movimiento": motion_result.id,
+            "completed": completed,
+            "missing_inventory": missing_inventory,
+        }
         
     except Exception as e:
         print(f"Error al confirmar la tarea: {e}")
+        await db.rollback()
         return {"result": 0, "message": f"Error al confirmar la tarea: {str(e)}"}
     
     

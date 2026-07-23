@@ -26,18 +26,28 @@ async def get_positions(db: AsyncSession):
 
 
 async def create_input_inventory(db: AsyncSession, inventory: Inventory):
+    """
+    Inserta el registro en inventario.
+    Fix: eliminado el 'await db.commit()' — el service maneja la transacción
+    completa (motion + inventory + delete_putaway) en un solo commit atómico.
+    """
     inventory_data = Inventory()
-    
     query = text("""
-                 INSERT INTO inventario ( id_posicion, id_item, cantidad, lote, detalles, fecha_vencimiento)
+                 INSERT INTO inventario (id_posicion, id_item, cantidad, lote, detalles, fecha_vencimiento)
                  VALUES (:id_posicion, :id_item, :cantidad, :lote, :detalles, :fecha_vencimiento)
                  RETURNING id
                  """)
     try:
-        result = await db.execute(query, {"id_posicion": inventory.id_posicion, "id_item":inventory.id_item,
-                                          "cantidad":inventory.cantidad, "lote": inventory.lote, "detalles": inventory.detalles, "fecha_vencimiento": inventory.fecha_vencimiento})
+        result = await db.execute(query, {
+            "id_posicion": inventory.id_posicion,
+            "id_item": inventory.id_item,
+            "cantidad": inventory.cantidad,
+            "lote": inventory.lote,
+            "detalles": inventory.detalles,
+            "fecha_vencimiento": inventory.fecha_vencimiento,
+        })
         row = result.mappings().first()
-        await db.commit()
+        # Sin commit — el service hace commit de toda la operación al final
         if row:
             inventory_data.id = row["id"]
             inventory_data.result = 1
@@ -81,24 +91,136 @@ async def get_position_by_item(db: AsyncSession, id_item:int, lote:str):
         return picking_item
 
 
-async def update_inventory_quantity(db: AsyncSession, id_posicion: int, id_item: int, lote: str, cantidad_salida: float):
+async def update_inventory_quantity(
+    db: AsyncSession,
+    id_posicion: int,
+    id_item: int,
+    lote: str,
+    cantidad_salida: float,
+    commit: bool = True,
+):
     """Actualiza la cantidad de inventario después de una salida (picking)."""
-    query = text("""
-                 UPDATE inventario
-                 SET cantidad = cantidad - :cantidad_salida
-                 WHERE id_posicion = :id_posicion AND id_item = :id_item AND lote = :lote
+    select_query = text("""
+                 SELECT id, cantidad
+                 FROM inventario
+                 WHERE id_posicion = :id_posicion AND id_item = :id_item
+                   AND lote IS NOT DISTINCT FROM :lote
+                 ORDER BY id
+                 LIMIT 1
+                 FOR UPDATE
                  """)
+    params = {
+        "id_posicion": id_posicion,
+        "id_item": id_item,
+        "lote": lote,
+        "cantidad_salida": float(cantidad_salida),
+    }
     try:
-        await db.execute(query, {"id_posicion": id_posicion, "id_item": id_item, 
-                                 "lote": lote, "cantidad_salida": cantidad_salida})
-        await db.commit()
-        return {"result": 1, "message": "Inventario actualizado exitosamente"}
+        result = await db.execute(select_query, params)
+        inventory_row = result.mappings().first()
+        if not inventory_row or float(inventory_row["cantidad"]) < params["cantidad_salida"]:
+            if commit:
+                await db.rollback()
+            return {
+                "result": 0,
+                "message": "El inventario asignado no existe o ya no tiene cantidad suficiente",
+            }
+
+        remaining_quantity = float(inventory_row["cantidad"]) - params["cantidad_salida"]
+        if remaining_quantity == 0:
+            result = await db.execute(
+                text("""
+                     DELETE FROM inventario
+                     WHERE id = :id
+                     RETURNING id
+                     """),
+                {"id": inventory_row["id"]},
+            )
+        else:
+            result = await db.execute(
+                text("""
+                     UPDATE inventario
+                     SET cantidad = :cantidad_restante
+                     WHERE id = :id
+                     RETURNING id
+                     """),
+                {
+                    "id": inventory_row["id"],
+                    "cantidad_restante": remaining_quantity,
+                },
+            )
+        updated_row = result.mappings().first()
+        if not updated_row:
+            if commit:
+                await db.rollback()
+            return {
+                "result": 0,
+                "message": "No fue posible actualizar el inventario asignado",
+            }
+        if commit:
+            await db.commit()
+        return {
+            "result": 1,
+            "message": "Inventario actualizado exitosamente",
+            "cantidad_restante": remaining_quantity,
+        }
     except Exception as e:
         print(f"Error al actualizar el inventario: {e}")
-        await db.rollback()
+        if commit:
+            await db.rollback()
         return {"result": 0, "message": "Error al actualizar el inventario"}
     
     
+async def get_inventory_by_position_item_lote(db: AsyncSession, id_posicion: int, id_item: int, lote: str):
+    """Busca un registro de inventario existente para una combinación exacta
+    de posición + item + lote. Se usa durante la importación masiva desde
+    Excel para decidir si se debe sumar cantidad a un registro existente o
+    crear uno nuevo."""
+    query = text("""
+                 SELECT id, id_posicion, id_item, cantidad, lote, detalles, fecha_vencimiento
+                 FROM inventario
+                 WHERE id_posicion = :id_posicion AND id_item = :id_item
+                       AND lote IS NOT DISTINCT FROM :lote
+                 """)
+    try:
+        result = await db.execute(query, {"id_posicion": id_posicion, "id_item": id_item, "lote": lote})
+        row = result.mappings().first()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"Error al buscar el inventario por posición/item/lote: {e}")
+        return None
+
+
+async def increment_inventory_quantity(db: AsyncSession, id_inventario: int, cantidad_sumar: float):
+    """Suma `cantidad_sumar` a la cantidad ya existente de un registro de inventario."""
+    inventory_data = Inventory()
+    query = text("""
+                 UPDATE inventario
+                 SET cantidad = cantidad + :cantidad_sumar
+                 WHERE id = :id
+                 RETURNING id, cantidad
+                 """)
+    try:
+        result = await db.execute(query, {"id": id_inventario, "cantidad_sumar": cantidad_sumar})
+        row = result.mappings().first()
+        await db.commit()
+        if row:
+            inventory_data.id = row["id"]
+            inventory_data.cantidad = row["cantidad"]
+            inventory_data.result = 1
+            inventory_data.message = "Cantidad de inventario incrementada exitosamente"
+        else:
+            inventory_data.result = 0
+            inventory_data.message = "No se encontró el registro de inventario a incrementar"
+        return inventory_data
+    except Exception as e:
+        print(f"Error al incrementar la cantidad de inventario: {e}")
+        await db.rollback()
+        inventory_data.result = 0
+        inventory_data.message = "Error al incrementar la cantidad de inventario"
+        return inventory_data
+
+
 async def count_expiration_alerts(db: AsyncSession):
     summary_aux = Summary()
     query = text("""

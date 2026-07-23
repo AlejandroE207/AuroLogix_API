@@ -17,13 +17,24 @@ async def get_items_by_codes(db: AsyncSession, codes: list[str]):
 
 
 async def get_inventory_for_items(db: AsyncSession, item_ids: list[int]):
-    """Devuelve inventario disponible ordenado para asignarlo a tareas de picking."""
+    """Devuelve inventario apto para salida, priorizando la zona de picking."""
     if not item_ids:
         return {}
     query = text("""
-        SELECT id_item, id_posicion, lote, cantidad FROM inventario
-        WHERE id_item IN :item_ids AND cantidad > 0
-        ORDER BY id_item, fecha_vencimiento NULLS LAST, id_posicion, lote
+        SELECT inv.id, inv.id_item, inv.id_posicion, inv.lote, inv.cantidad,
+               inv.fecha_vencimiento, pos.cod_posicion, pos.reserva
+        FROM inventario AS inv
+        INNER JOIN posiciones AS pos ON pos.id = inv.id_posicion
+        WHERE inv.id_item IN :item_ids
+          AND inv.cantidad > 0
+          AND pos.estado <> 3
+          AND LOWER(TRIM(pos.reserva)) IN ('picking', 'abastecimiento')
+        ORDER BY
+            inv.id_item,
+            CASE WHEN LOWER(TRIM(pos.reserva)) = 'picking' THEN 0 ELSE 1 END,
+            inv.fecha_vencimiento NULLS LAST,
+            pos.cod_posicion,
+            inv.id
     """).bindparams(bindparam("item_ids", expanding=True))
     result = await db.execute(query, {"item_ids": item_ids})
     inventory: dict[int, list[dict]] = {}
@@ -43,7 +54,7 @@ async def get_existing_order_codes(db: AsyncSession, codes: list[str]) -> set[st
 
 
 async def create_bulk_pickings(db: AsyncSession, orders: list[dict]) -> list[dict]:
-    """Inserta el lote completo sin confirmar la sesión."""
+    """Inserta órdenes, pickings y detalles sin asignar todavía el inventario."""
     created = []
     order_query = text("""
         INSERT INTO orden_salida (codigo, cliente, estado, id_usuario, tipo, detalles)
@@ -57,21 +68,55 @@ async def create_bulk_pickings(db: AsyncSession, orders: list[dict]) -> list[dic
         INSERT INTO picking_detalle (id_picking, id_item, cantidad, lote)
         VALUES (:id_picking, :id_item, :cantidad, :lote)
     """)
-    task_query = text("""
-        INSERT INTO picking_task (id_picking, id_item, cantidad, lote, id_posicion_origen, estado)
-        VALUES (:id_picking, :id_item, :cantidad, :lote, :id_posicion_origen, 1)
-    """)
     for order in orders:
         order_id = (await db.execute(order_query, order)).mappings().one()["id"]
         picking_id = (await db.execute(picking_query, {
             "id_orden": order_id, "id_usuario": order["id_usuario"]
         })).mappings().one()["id"]
-        for task in order["tasks"]:
-            values = {**task, "id_picking": picking_id}
+        for item in order["items"]:
+            values = {**item, "id_picking": picking_id}
             await db.execute(detail_query, values)
-            await db.execute(task_query, values)
         created.append({"codigo": order["codigo"], "order_id": order_id, "picking_id": picking_id})
     return created
+
+
+async def get_picking_details(db: AsyncSession, id_picking: int) -> list[dict]:
+    query = text("""
+        SELECT pd.id_item, i.cod_item, pd.cantidad, pd.lote
+        FROM picking_detalle AS pd
+        INNER JOIN items AS i ON i.id = pd.id_item
+        WHERE pd.id_picking = :id_picking
+        ORDER BY pd.id
+    """)
+    result = await db.execute(query, {"id_picking": id_picking})
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def count_picking_tasks(db: AsyncSession, id_picking: int) -> int:
+    query = text("SELECT COUNT(*) FROM picking_task WHERE id_picking = :id_picking")
+    result = await db.execute(query, {"id_picking": id_picking})
+    return int(result.scalar_one())
+
+
+async def count_pending_picking_tasks(db: AsyncSession, id_picking: int) -> int:
+    query = text("""
+        SELECT COUNT(*)
+        FROM picking_task
+        WHERE id_picking = :id_picking AND estado = 1
+    """)
+    result = await db.execute(query, {"id_picking": id_picking})
+    return int(result.scalar_one())
+
+
+async def insert_picking_tasks(db: AsyncSession, id_picking: int, tasks: list[dict]) -> None:
+    query = text("""
+        INSERT INTO picking_task
+            (id_picking, id_item, cantidad, lote, id_posicion_origen, estado)
+        VALUES
+            (:id_picking, :id_item, :cantidad, :lote, :id_posicion_origen, 1)
+    """)
+    for task in tasks:
+        await db.execute(query, {**task, "id_picking": id_picking})
 
 
 
@@ -174,12 +219,21 @@ async def get_next_task(db: AsyncSession, id_picking: int):
     """Obtiene la siguiente tarea pendiente de un picking."""
     task_result = Picking_items()
     query = text("""
-                    SELECT pt.id, pt.id_picking, pt.id_item, i.cod_item, i.descripcion ,pt.cantidad, pt.lote, pt.id_posicion_origen,p.cod_posicion, pt.estado
+                    SELECT pt.id, pt.id_picking, pt.id_item, i.cod_item, i.descripcion,
+                           pt.cantidad, pt.lote, pt.id_posicion_origen, p.cod_posicion,
+                           p.reserva, pt.estado
                     FROM picking_task as pt
                     INNER JOIN posiciones as p ON id_posicion_origen = p.id 
                     INNER JOIN items as i ON pt.id_item = i.id
                     WHERE pt.id_picking = :id_picking AND pt.estado = 1
-                    ORDER BY id
+                    ORDER BY
+                        CASE
+                            WHEN LOWER(TRIM(p.reserva)) = 'picking' THEN 0
+                            WHEN LOWER(TRIM(p.reserva)) = 'abastecimiento' THEN 1
+                            ELSE 2
+                        END,
+                        p.cod_posicion,
+                        pt.id
                     LIMIT 1
                  """)
 
@@ -194,6 +248,7 @@ async def get_next_task(db: AsyncSession, id_picking: int):
             task_result.lote = row["lote"]
             task_result.id_posicion_origen = row["id_posicion_origen"]
             task_result.cod_posicion_origen = row["cod_posicion"]
+            task_result.reserva = row["reserva"]
             task_result.result = 1
             task_result.message = "Tarea obtenida exitosamente"
             # Agregar el ID de la tarea para referencia
@@ -209,7 +264,53 @@ async def get_next_task(db: AsyncSession, id_picking: int):
         return task_result
 
 
-async def update_task_status(db: AsyncSession, id_task: int, estado: int):
+async def get_task_by_id(db: AsyncSession, id_picking: int, id_task: int):
+    """Obtiene una tarea concreta y valida que pertenezca al picking."""
+    query = text("""
+        SELECT pt.id, pt.id_item, i.cod_item, i.descripcion, pt.cantidad,
+               pt.lote, pt.id_posicion_origen, p.cod_posicion, p.reserva, pt.estado
+        FROM picking_task AS pt
+        INNER JOIN posiciones AS p ON p.id = pt.id_posicion_origen
+        INNER JOIN items AS i ON i.id = pt.id_item
+        WHERE pt.id = :id_task AND pt.id_picking = :id_picking
+    """)
+    result = await db.execute(query, {"id_task": id_task, "id_picking": id_picking})
+    row = result.mappings().first()
+    if not row:
+        return None
+    return Picking_items(
+        id=row["id"], id_item=row["id_item"], cod_item=row["cod_item"],
+        nombre_item=row["descripcion"], cantidad=row["cantidad"], lote=row["lote"],
+        id_posicion_origen=row["id_posicion_origen"],
+        cod_posicion_origen=row["cod_posicion"], reserva=row["reserva"],
+        estado=row["estado"], result=1,
+    )
+
+
+async def list_picking_tasks(db: AsyncSession, id_picking: int) -> list[dict]:
+    """Lista las extracciones pendientes y realizadas de un picking."""
+    query = text("""
+        SELECT pt.id AS task_id, pt.id_item, i.cod_item, i.descripcion AS nombre_item,
+               pt.cantidad, pt.lote, pt.id_posicion_origen,
+               p.cod_posicion AS cod_posicion_origen, p.reserva, pt.estado,
+               CASE pt.estado
+                   WHEN 1 THEN 'pendiente'
+                   WHEN 3 THEN 'realizada'
+                   ELSE 'en_proceso'
+               END AS estado_descripcion
+        FROM picking_task AS pt
+        INNER JOIN posiciones AS p ON p.id = pt.id_posicion_origen
+        INNER JOIN items AS i ON i.id = pt.id_item
+        WHERE pt.id_picking = :id_picking
+        ORDER BY CASE WHEN pt.estado = 1 THEN 0 ELSE 1 END, pt.id
+    """)
+    result = await db.execute(query, {"id_picking": id_picking})
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def update_task_status(
+    db: AsyncSession, id_task: int, estado: int, commit: bool = True
+):
     """Actualiza el estado de una tarea de picking."""
     query = text("""
                  UPDATE picking_task
@@ -218,14 +319,18 @@ async def update_task_status(db: AsyncSession, id_task: int, estado: int):
                  """)
     try:
         await db.execute(query, {"id_task": id_task, "estado": estado})
-        await db.commit()
+        if commit:
+            await db.commit()
         return {"result": 1, "message": "Estado de la tarea actualizado exitosamente"}
     except Exception as e:
         print(f"Error al actualizar el estado de la tarea: {e}")
-        await db.rollback()
+        if commit:
+            await db.rollback()
         return {"result": 0, "message": "Error al actualizar el estado de la tarea"}
 
-async def complete_picking(db: AsyncSession, id_picking: int):
+async def complete_picking(
+    db: AsyncSession, id_picking: int, commit: bool = True
+):
     """Marca un picking como completado cuando no hay más tareas pendientes."""
     query = text("""
                  UPDATE picking
@@ -234,11 +339,13 @@ async def complete_picking(db: AsyncSession, id_picking: int):
                  """)
     try:
         await db.execute(query, {"id_picking": id_picking})
-        await db.commit()
+        if commit:
+            await db.commit()
         return {"result": 1, "message": "Picking completado exitosamente"}
     except Exception as e:
         print(f"Error al completar el picking: {e}")
-        await db.rollback()
+        if commit:
+            await db.rollback()
         return {"result": 0, "message": "Error al completar el picking"}
     
 async def list_picking_view(db:AsyncSession):
