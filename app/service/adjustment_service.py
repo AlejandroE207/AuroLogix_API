@@ -2,7 +2,8 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.repository import adjustment_repository
+from app.repository import adjustment_repository, inventory_repository
+from app.model.inventory_model import Inventory
 
 # Tipos de movimiento para ajustes (deben existir en la tabla tipo_movimientos)
 MOTION_AJUSTE_POSITIVO = 4
@@ -12,6 +13,7 @@ MOTION_AJUSTE_NEGATIVO = 5
 AJUSTE_MODIFICACION = "MODIFICACION"
 AJUSTE_FUSION = "FUSION"
 AJUSTE_ELIMINACION = "ELIMINACION"
+AJUSTE_CONTEO_CICLICO = "Inventario_Ciclico"
 
 
 def _normalize_lote(lote):
@@ -258,6 +260,141 @@ async def delete_position_inventory(db: AsyncSession, id_inventario: int, motivo
         print(f"Error al eliminar el inventario de la posicion: {e}")
         await db.rollback()
         return {"result": 0, "message": "Error al retirar el item de la posicion"}
+
+
+async def register_cycle_count(db: AsyncSession, id_posicion: int, id_item: int, lote: str,
+                               cantidad: float, fecha_vencimiento: datetime, motivo: str, id_usuario: int):
+    """Registra la presencia de un item en una posicion mediante un conteo unico
+    (sin el doble conteo de inv_aux/inv_conteo). Pensado para el rol Inventarios.
+
+    Reglas:
+    - Si la combinacion posicion + item + lote ya existe en inventario, la
+      cantidad (y la fecha de vencimiento) se REEMPLAZAN por las indicadas.
+    - Si no existe, se crea un nuevo registro de inventario y la posicion
+      queda marcada como ocupada.
+    - Todo cambio queda registrado en inventario_ajustes (tipo_ajuste =
+      'Inventario_Ciclico') y genera un movimiento de ajuste (tipo 4 = positivo,
+      tipo 5 = negativo) para que el kardex de movimientos siga cuadrando con
+      el inventario. El motivo es obligatorio.
+    - Toda la operacion es atomica: un solo commit al final.
+    """
+    # ---------- Validaciones ----------
+    motivo = (motivo or "").strip()
+    if not motivo:
+        return {"result": 0, "message": "El motivo del registro es obligatorio"}
+
+    if cantidad is None or cantidad <= 0:
+        return {"result": 0, "message": "La cantidad debe ser mayor que cero"}
+
+    if not await adjustment_repository.item_exists(db, id_item):
+        return {"result": 0, "message": "El item indicado no existe"}
+
+    lote = _normalize_lote(lote)
+    now = datetime.now()
+
+    current = await adjustment_repository.get_inventory_by_position_item_lote(db, id_posicion, id_item, lote)
+
+    try:
+        if current:
+            id_inventario = current["id"]
+            cantidad_anterior = float(current["cantidad"] or 0)
+            fecha_anterior = current["fecha_vencimiento"]
+
+            quantity_changed = float(cantidad) != cantidad_anterior
+            fecha_changed = not _dates_equal(fecha_vencimiento, fecha_anterior)
+            if not quantity_changed and not fecha_changed:
+                return {"result": 2, "message": "No se detectaron cambios en el registro"}
+
+            ok = await adjustment_repository.update_record(
+                db, id_inventario, id_item, lote, cantidad, fecha_vencimiento
+            )
+            if not ok:
+                raise RuntimeError("No se pudo actualizar el registro de inventario")
+
+            if quantity_changed:
+                delta = float(cantidad) - cantidad_anterior
+                tipo = MOTION_AJUSTE_POSITIVO if delta > 0 else MOTION_AJUSTE_NEGATIVO
+                motion_id = await adjustment_repository.insert_adjustment_motion(
+                    db, tipo, id_item, lote, abs(delta), id_posicion, id_usuario, now
+                )
+                if motion_id is None:
+                    raise RuntimeError("No se pudo registrar el movimiento del conteo ciclico")
+
+            adjustment_data = {
+                "id_inventario": id_inventario,
+                "id_inventario_destino": None,
+                "id_posicion": id_posicion,
+                "tipo_ajuste": AJUSTE_CONTEO_CICLICO,
+                "id_item_anterior": id_item,
+                "id_item_nuevo": id_item,
+                "lote_anterior": lote,
+                "lote_nuevo": lote,
+                "cantidad_anterior": cantidad_anterior,
+                "cantidad_nueva": cantidad,
+                "fecha_vencimiento_anterior": fecha_anterior,
+                "fecha_vencimiento_nueva": fecha_vencimiento,
+                "motivo": motivo,
+                "id_usuario": id_usuario,
+                "fecha": now,
+            }
+            mensaje = "Conteo ciclico registrado: cantidad actualizada exitosamente"
+        else:
+            nuevo_inventario = Inventory(
+                id_posicion=id_posicion,
+                id_item=id_item,
+                cantidad=cantidad,
+                lote=lote,
+                fecha_vencimiento=fecha_vencimiento,
+                detalles="Registrado por conteo ciclico (sin doble conteo)",
+            )
+            creado = await inventory_repository.create_input_inventory(db, nuevo_inventario)
+            if creado.result != 1:
+                raise RuntimeError(creado.message or "No se pudo crear el registro de inventario")
+            id_inventario = creado.id
+
+            motion_id = await adjustment_repository.insert_adjustment_motion(
+                db, MOTION_AJUSTE_POSITIVO, id_item, lote, cantidad, id_posicion, id_usuario, now
+            )
+            if motion_id is None:
+                raise RuntimeError("No se pudo registrar el movimiento del conteo ciclico")
+
+            await adjustment_repository.set_position_occupied(db, id_posicion)
+
+            adjustment_data = {
+                "id_inventario": id_inventario,
+                "id_inventario_destino": None,
+                "id_posicion": id_posicion,
+                "tipo_ajuste": AJUSTE_CONTEO_CICLICO,
+                "id_item_anterior": None,
+                "id_item_nuevo": id_item,
+                "lote_anterior": None,
+                "lote_nuevo": lote,
+                "cantidad_anterior": 0,
+                "cantidad_nueva": cantidad,
+                "fecha_vencimiento_anterior": None,
+                "fecha_vencimiento_nueva": fecha_vencimiento,
+                "motivo": motivo,
+                "id_usuario": id_usuario,
+                "fecha": now,
+            }
+            mensaje = "Conteo ciclico registrado: item agregado a la posicion exitosamente"
+
+        adjustment_id = await adjustment_repository.insert_adjustment(db, adjustment_data)
+        if adjustment_id is None:
+            raise RuntimeError("No se pudo registrar el ajuste en el historial")
+
+        await db.commit()
+        return {
+            "result": 1,
+            "message": mensaje,
+            "id_ajuste": adjustment_id,
+            "id_inventario": id_inventario,
+        }
+
+    except Exception as e:
+        print(f"Error al registrar el conteo ciclico: {e}")
+        await db.rollback()
+        return {"result": 0, "message": "Error al registrar el conteo ciclico"}
 
 
 async def list_adjustments(db: AsyncSession, cod_posicion: str = None, item: str = None,

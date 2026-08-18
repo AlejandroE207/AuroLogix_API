@@ -57,8 +57,42 @@ async def create_input_inventory(
         }
     else:
         raise HTTPException(status_code=400, detail=result["message"])
-    
-    
+
+
+@router.post("/register_cycle_count")
+async def register_cycle_count(
+    db: AsyncSession = Depends(get_db),
+    id_posicion: int = Body(..., embed=True),
+    id_item: int = Body(..., embed=True),
+    lote: str | None = Body(None, embed=True),
+    cantidad: float = Body(..., embed=True),
+    fecha_vencimiento: datetime | None = Body(None, embed=True),
+    motivo: str = Body(..., embed=True),
+    current_user_role: int = Depends(require_role(2, 6)),  # Administrador, Inventarios
+    id_usuario: int = Depends(get_current_user_id),
+):
+    """Registra que un item existe en una posicion mediante un conteo unico,
+    sin el doble conteo de inv_aux/inv_conteo. Pensado para el rol Inventarios (6).
+
+    Si la combinacion posicion + item + lote ya existe, la cantidad y la fecha
+    de vencimiento se reemplazan por las indicadas; si no existe, se crea el
+    registro. Queda trazabilidad completa en inventario_ajustes (tipo
+    'Inventario_Ciclico') y en movimientos (ajuste positivo/negativo). El
+    motivo es obligatorio.
+    """
+    result = await adjustment_service.register_cycle_count(
+        db, id_posicion, id_item, lote, cantidad, fecha_vencimiento, motivo, id_usuario
+    )
+    if result["result"] == 1:
+        return result
+    if result["result"] == 2:
+        # Sin cambios: no es un error, pero se informa al cliente
+        return result
+
+    status_code = 400
+    raise HTTPException(status_code=status_code, detail=result["message"])
+
+
 @router.post("/import_inventory")
 async def import_inventory(
     file: UploadFile = File(...),
@@ -186,12 +220,16 @@ async def delete_position_inventory(
     db: AsyncSession = Depends(get_db),
     id_inventario: int = Body(..., embed=True),
     motivo: str = Body(..., embed=True),
-    current_user_role: int = Depends(require_role(2, 4)),  # Administrador, Supervisor
+    current_user_role: int = Depends(require_role(2, 4, 6)),  # Administrador, Supervisor, Inventarios
     id_usuario: int = Depends(get_current_user_id),
 ):
     """Retira por completo un item de una posicion (ajuste negativo por el
     total). Queda registrado en inventario_ajustes como ELIMINACION y en
     movimientos como ajuste negativo. El motivo es obligatorio.
+
+    El rol Inventarios (6) tambien puede usarlo para corregir una posicion
+    durante un conteo ciclico cuando el sistema tiene registrado un item que
+    en realidad no esta ahi.
     """
     result = await adjustment_service.delete_position_inventory(db, id_inventario, motivo, id_usuario)
     if result["result"] == 1:

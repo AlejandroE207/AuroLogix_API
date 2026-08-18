@@ -172,6 +172,42 @@ async def add_quantity_to_target(db: AsyncSession, id_inventario: int, cantidad_
     return result.mappings().first() is not None
 
 
+async def get_inventory_by_position_item_lote(db: AsyncSession, id_posicion: int, id_item: int, lote: str):
+    """Busca un registro de inventario existente para una combinacion exacta
+    de posicion + item + lote. Se usa en el registro de conteo ciclico para
+    decidir si se crea un registro nuevo o se reemplaza la cantidad del
+    existente."""
+    query = text("""
+                 SELECT id, id_posicion, id_item, cantidad, lote, fecha_vencimiento
+                 FROM inventario
+                 WHERE id_posicion = :id_posicion
+                   AND id_item = :id_item
+                   AND lote IS NOT DISTINCT FROM :lote
+                 """)
+    try:
+        result = await db.execute(query, {
+            "id_posicion": id_posicion,
+            "id_item": id_item,
+            "lote": lote,
+        })
+        row = result.mappings().first()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"Error al buscar el inventario por posicion/item/lote: {e}")
+        return None
+
+
+async def set_position_occupied(db: AsyncSession, id_posicion: int):
+    """Marca una posicion como ocupada (estado 2) si no lo estaba ya. SIN commit."""
+    query = text("""
+                 UPDATE posiciones
+                 SET estado = 2
+                 WHERE id = :id_posicion AND estado <> 2
+                 """)
+    await db.execute(query, {"id_posicion": id_posicion})
+    return True
+
+
 async def insert_adjustment(db: AsyncSession, data: dict):
     """Inserta el registro de auditoria en inventario_ajustes. SIN commit."""
     query = text("""
